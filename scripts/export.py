@@ -11,37 +11,39 @@ Writes happen in batches via pyarrow.parquet.ParquetWriter so memory stays
 O(batch_size) instead of O(full corpus). At 186k acts the previous
 list-then-DataFrame approach OOM'd.
 
-Schemas (final v1, no embeddings yet):
+Schemas (final v1, no embeddings yet). Column naming follows the rule
+`<level>_<role>` so the role of each column is unambiguous when tables are
+joined (act_number ≠ article_number ≠ paragraph_number).
 
     acte.parquet
-        id                  INT64
-        type                STRING       — LEGE, OUG, HG, ORDIN, DECIZIE, ...
-        number              STRING NULL  — "287", "75", or NULL (raw)
-        canonical_citation  STRING       — "Legea 287/2009", "OUG 100/2024", "Codul Civil"
-        issuer              STRING       — emitter (uppercase)
-        title               STRING
-        content             STRING       — full raw act text
-        adopted_at          DATE   NULL
-        published_at        DATE   NULL  — gazette publication
-        effective_at        DATE   NULL  — entry into force
-        gazette_number      INT64  NULL
-        link                STRING NULL
-        synced_at           TIMESTAMP
+        id              INT64
+        type            STRING       — LEGE, OUG, HG, ORDIN, DECIZIE, ...
+        act_number      STRING NULL  — raw act number from SOAP: "287", "75", or NULL
+        act_citation    STRING       — display label: "Legea 287/2009", "OUG 100/2024", "Codul Civil"
+        issuer          STRING       — emitter (uppercase)
+        title           STRING       — full official title
+        content         STRING       — full raw act text
+        adopted_at      DATE   NULL
+        published_at    DATE   NULL  — gazette publication
+        effective_at    DATE   NULL  — entry into force
+        gazette_number  INT64  NULL
+        link            STRING NULL  — legislatie.just.ro URL
+        synced_at       TIMESTAMP
 
     articole.parquet
-        id              INT64
-        act_id          INT64
-        number          INT64  NULL
-        number_variant  STRING NULL  — "bis", "ter", "^1" ...
-        full_path       STRING       — "Art. 188 bis"
-        content         STRING
+        id                INT64
+        act_id            INT64        — FK → acte.id
+        article_number    INT64  NULL  — ordinal within the act: 188
+        article_variant   STRING NULL  — suffix when present: "bis", "ter", "^1" ...
+        article_citation  STRING       — display label: "Art. 188", "Art. 188 bis"
+        content           STRING       — article text (all paragraphs concatenated)
 
     alineate.parquet
-        id              INT64
-        article_id      INT64
-        number          INT64  NULL  — NULL = whole article, no alineat
-        full_path       STRING       — "Art. 188 alin. (1)"
-        content         STRING
+        id                  INT64
+        article_id          INT64        — FK → articole.id
+        paragraph_number    INT64  NULL  — ordinal within the article (NULL = monolithic article)
+        paragraph_citation  STRING       — display label: "Art. 188 alin. (1)"
+        content             STRING       — paragraph text
 """
 
 import hashlib
@@ -64,8 +66,8 @@ ACTS_SCHEMA = pa.schema(
     [
         ("id", pa.int64()),
         ("type", pa.string()),
-        ("number", pa.string()),
-        ("canonical_citation", pa.string()),
+        ("act_number", pa.string()),
+        ("act_citation", pa.string()),
         ("issuer", pa.string()),
         ("title", pa.string()),
         ("content", pa.string()),
@@ -81,9 +83,9 @@ ARTICLES_SCHEMA = pa.schema(
     [
         ("id", pa.int64()),
         ("act_id", pa.int64()),
-        ("number", pa.int64()),
-        ("number_variant", pa.string()),
-        ("full_path", pa.string()),
+        ("article_number", pa.int64()),
+        ("article_variant", pa.string()),
+        ("article_citation", pa.string()),
         ("content", pa.string()),
     ]
 )
@@ -91,8 +93,8 @@ PARAGRAPHS_SCHEMA = pa.schema(
     [
         ("id", pa.int64()),
         ("article_id", pa.int64()),
-        ("number", pa.int64()),
-        ("full_path", pa.string()),
+        ("paragraph_number", pa.int64()),
+        ("paragraph_citation", pa.string()),
         ("content", pa.string()),
     ]
 )
@@ -167,19 +169,17 @@ _SINGLETON_CITATIONS: dict[str, str] = {
 }
 
 
-def _canonical_citation(
+def _build_act_citation(
     type_: str | None,
-    number: str | None,
+    act_number: str | None,
     adopted_at,
     issuer: str | None,
 ) -> str:
-    """Build the citation a Romanian lawyer would type. Always returns a string.
+    """Build the act-level citation a Romanian lawyer would type. Always returns a string.
 
-    Year comes from `adopted_at` only — published_at (Monitorul Oficial date)
-    can shift across years for acts adopted late December, so using it as a
-    fallback would silently misattribute ~5 acts/year. Acts with no parseable
-    adoption date get a year-less citation like "Ordinul 713" — honest about
-    the missing info; the LLM can disambiguate by issuer / title / link.
+    Year comes from `adopted_at` only — published_at (M.Of. date) can shift across
+    years for acts adopted late December, so using it as a fallback would silently
+    misattribute ~5 acts/year.
     """
     if not type_:
         return ""
@@ -194,11 +194,10 @@ def _canonical_citation(
         short = "Hotărârea"
 
     year = adopted_at.year if adopted_at else None
-    if number and year:
-        # Some sources already carry "287/2009"; don't double-suffix the year.
-        return f"{short} {number}" if "/" in number else f"{short} {number}/{year}"
-    if number:
-        return f"{short} {number}"
+    if act_number and year:
+        return f"{short} {act_number}" if "/" in act_number else f"{short} {act_number}/{year}"
+    if act_number:
+        return f"{short} {act_number}"
     if adopted_at:
         return f"{short} din {adopted_at.isoformat()}"
     return short
@@ -239,7 +238,7 @@ def main() -> None:
             next_act_id += 1
 
             type_ = raw.get("TipAct")
-            number = raw.get("Numar")
+            act_number = raw.get("Numar")
             issuer = raw.get("Emitent")
             adopted_at = _parse_date(raw.get("AdoptedAt"))
 
@@ -247,8 +246,8 @@ def main() -> None:
                 {
                     "id": act_id,
                     "type": type_,
-                    "number": number,
-                    "canonical_citation": _canonical_citation(type_, number, adopted_at, issuer),
+                    "act_number": act_number,
+                    "act_citation": _build_act_citation(type_, act_number, adopted_at, issuer),
                     "issuer": issuer,
                     "title": _strip_bom(raw.get("Titlu")),
                     "content": _strip_bom(raw.get("Text")) or "",
@@ -262,6 +261,8 @@ def main() -> None:
             )
             n_acts += 1
 
+            # parse.py emits dicts with internal keys (`number`, `number_variant`,
+            # `full_path`); we map them here to the level-prefixed schema names.
             for article in parsed["articles"]:
                 article_id = next_article_id
                 next_article_id += 1
@@ -269,9 +270,9 @@ def main() -> None:
                     {
                         "id": article_id,
                         "act_id": act_id,
-                        "number": article["number"],
-                        "number_variant": article["number_variant"],
-                        "full_path": article["full_path"],
+                        "article_number": article["number"],
+                        "article_variant": article["number_variant"],
+                        "article_citation": article["full_path"],
                         "content": article["content"],
                     }
                 )
@@ -282,8 +283,8 @@ def main() -> None:
                         {
                             "id": next_paragraph_id,
                             "article_id": article_id,
-                            "number": paragraph["number"],
-                            "full_path": paragraph["full_path"],
+                            "paragraph_number": paragraph["number"],
+                            "paragraph_citation": paragraph["full_path"],
                             "content": paragraph["content"],
                         }
                     )

@@ -42,10 +42,10 @@ import duckdb
 conn = duckdb.connect()
 conn.execute(open("data/create_views.sql").read())
 conn.execute("""
-    SELECT full_path, content
+    SELECT act_citation, link, article_citation, content
     FROM articole
     WHERE act_id IN (SELECT id FROM cod_penal)
-      AND number = 188
+      AND article_number = 188
 """).fetchall()
 ```
 

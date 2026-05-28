@@ -10,7 +10,7 @@ index-build cost. Query shape:
 
     ATTACH 'data/laws/fts.duckdb' AS fts (READ_ONLY);
 
-    SELECT a.full_path, a.content,
+    SELECT a.act_citation, a.link, a.article_citation, a.content,
            fts.fts_main_articole_fts.match_bm25(af.id, 'omor') AS score
     FROM fts.articole_fts af
     JOIN articole a ON a.id = af.id
