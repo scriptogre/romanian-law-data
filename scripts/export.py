@@ -1,7 +1,11 @@
 """
 Stage 4 — export.py
 
-Stream `data/parsed.jsonl` into three parquet files and a sha256 digest.
+Read parsed acts from stdin (one JSONL line per act, as emitted by parse.py)
+and stream them into three parquet files plus a sha256 digest. The pipe-only
+input avoids materializing the ~10 GB parsed.jsonl on disk; run as:
+
+    python -m scripts.parse | python -m scripts.export
 
 Writes happen in batches via pyarrow.parquet.ParquetWriter so memory stays
 O(batch_size) instead of O(full corpus). At 186k acts the previous
@@ -42,6 +46,7 @@ Schemas (final v1, no embeddings yet):
 
 import hashlib
 import json
+import sys
 from datetime import UTC, datetime
 from pathlib import Path
 
@@ -50,7 +55,6 @@ import pyarrow.parquet as pq
 from loguru import logger
 
 DATA_DIR = Path(__file__).parent.parent / "data"
-INPUT_PATH = DATA_DIR / "parsed.jsonl"
 ACTE_PATH = DATA_DIR / "acte.parquet"
 ARTICOLE_PATH = DATA_DIR / "articole.parquet"
 ALINEATE_PATH = DATA_DIR / "alineate.parquet"
@@ -108,7 +112,7 @@ def _parse_date(value: str | None):
 
 
 def _strip_bom(value: str | None) -> str | None:
-    """Defensive BOM strip on text fields read from parsed.jsonl."""
+    """Defensive BOM strip on text fields read from the parse stream."""
     if value is None:
         return None
     cleaned = value.lstrip("﻿").strip()
@@ -225,9 +229,8 @@ def main() -> None:
         pq.ParquetWriter(ACTE_PATH, ACTS_SCHEMA, compression="zstd") as acts_writer,
         pq.ParquetWriter(ARTICOLE_PATH, ARTICLES_SCHEMA, compression="zstd") as articles_writer,
         pq.ParquetWriter(ALINEATE_PATH, PARAGRAPHS_SCHEMA, compression="zstd") as paragraphs_writer,
-        INPUT_PATH.open(encoding="utf-8") as fp,
     ):
-        for line in fp:
+        for line in sys.stdin:
             parsed = json.loads(line)
             raw = parsed["raw"]
 

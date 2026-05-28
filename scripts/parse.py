@@ -3,7 +3,11 @@ Stage 3 — parse.py
 
 Extract articles + paragraphs (alineate) from each act's plain text.
 
-Reads `data/normalized_acts.jsonl`, writes `data/parsed.jsonl` with shape:
+Reads `data/normalized_acts.jsonl`, writes parsed acts to stdout (one JSONL line
+per act) so the next stage (export.py) can pipe-consume without intermediate
+disk. The per-act diagnostic report still writes to `data/parse_report.jsonl`.
+
+Output shape (per stdout line):
 
     {
         "raw": <normalized act dict>,
@@ -45,12 +49,12 @@ Per-act scores written to `data/parse_report.jsonl`.
 
 import json
 import re
+import sys
 from pathlib import Path
 
 from loguru import logger
 
 INPUT_PATH = Path(__file__).parent.parent / "data" / "normalized_acts.jsonl"
-OUTPUT_PATH = Path(__file__).parent.parent / "data" / "parsed.jsonl"
 REPORT_PATH = Path(__file__).parent.parent / "data" / "parse_report.jsonl"
 
 MIN_ARTICLES_FOR_CLEAN_PARSE = 1
@@ -549,7 +553,7 @@ def parse_act(act: dict) -> dict:
 
 
 def main() -> None:
-    OUTPUT_PATH.parent.mkdir(parents=True, exist_ok=True)
+    REPORT_PATH.parent.mkdir(parents=True, exist_ok=True)
     total = 0
     bands: dict[str, int] = {"high": 0, "medium": 0, "low": 0, "intentional-fallback": 0}
     gates: dict[str, int] = {"detection_recall_low": 0, "detection_recall_medium": 0}
@@ -557,13 +561,12 @@ def main() -> None:
 
     with (
         INPUT_PATH.open(encoding="utf-8") as src,
-        OUTPUT_PATH.open("w", encoding="utf-8") as dst,
         REPORT_PATH.open("w", encoding="utf-8") as report,
     ):
         for line in src:
             act = json.loads(line)
             parsed = parse_act(act)
-            dst.write(json.dumps(parsed, ensure_ascii=False) + "\n")
+            sys.stdout.write(json.dumps(parsed, ensure_ascii=False) + "\n")
             total += 1
 
             quality = parsed["quality"]
@@ -592,7 +595,7 @@ def main() -> None:
             )
 
     avg = score_sum / total if total else 0.0
-    logger.success(f"parsed {total} acts → {OUTPUT_PATH}")
+    logger.success(f"parsed {total} acts → stdout")
     logger.info(f"  mean quality score:    {avg:.3f}")
     logger.info(
         f"  high   (≥{HIGH_QUALITY}):           {bands['high']:>6d} ({bands['high'] / total:.1%})"

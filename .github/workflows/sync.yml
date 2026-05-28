@@ -47,11 +47,8 @@ jobs:
       - name: Normalize
         run: uv run python -m scripts.normalize
 
-      - name: Parse
-        run: uv run python -m scripts.parse
-
-      - name: Export parquet
-        run: uv run python -m scripts.export
+      - name: Parse → Export parquet
+        run: uv run python -m scripts.parse | uv run python -m scripts.export
 
       - name: Build FTS index
         run: uv run python -m scripts.build_fts

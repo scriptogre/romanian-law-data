@@ -52,20 +52,22 @@ conn.execute("""
 ## Pipeline
 
 ```
-collect.py    SOAP API → data/raw_acts.jsonl
+collect.py    SOAP API           → data/raw_acts.jsonl
 normalize.py  → fix encoding, dedup, extract dates + gazette number
+                                 → data/normalized_acts.jsonl
 parse.py      → extract articles + alineate
-export.py     → write parquet bundle + sha256
+                                 → stdout (piped)
+export.py     → write parquet bundle + sha256 from stdin
 ```
 
-Stage outputs checkpoint as JSONL so the pipeline is resumable.
+`collect` and `normalize` checkpoint to JSONL (resumable). `parse` and `export`
+are piped — no intermediate `parsed.jsonl` on disk.
 
 ```bash
 uv sync
 uv run python -m scripts.collect
 uv run python -m scripts.normalize
-uv run python -m scripts.parse
-uv run python -m scripts.export
+uv run python -m scripts.parse | uv run python -m scripts.export
 ```
 
 ## License
