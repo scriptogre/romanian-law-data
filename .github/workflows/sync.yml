@@ -19,10 +19,6 @@ jobs:
     timeout-minutes: 360
     env:
       ETL_MAX_ACTS: ${{ inputs.max_acts }}
-      # GitHub Actions runners (ubuntu-latest) handle SOAP I/O concurrency well
-      # past CPU count since the work is network-bound. 24 is empirically safe
-      # against legislatie.just.ro's implicit rate-limit; bump higher if logs
-      # show no retry storms and we want faster collect.
       ETL_CONCURRENCY: "24"
     steps:
       - name: Free disk space
