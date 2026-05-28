@@ -54,29 +54,28 @@ jobs:
       - name: Build FTS index
         run: uv run python -m scripts.build_fts
 
-      - name: Bundle artifact
-        id: bundle
+      - name: Prepare release files + manifest
+        id: prep
         run: |
           cp create_views.sql data/create_views.sql
-          tar -czvf laws.tar.gz -C data \
-            acte.parquet articole.parquet alineate.parquet fts.duckdb create_views.sql
-          NEW_SHA=$(sha256sum laws.tar.gz | awk '{print $1}')
-          echo "sha=$NEW_SHA" >> "$GITHUB_OUTPUT"
+          cd data
+          sha256sum acte.parquet articole.parquet alineate.parquet fts.duckdb create_views.sql > laws.sha256
           echo "tag=laws/$(date -u +%Y-%m-%d)" >> "$GITHUB_OUTPUT"
 
-      - name: Check whether digest changed vs latest release
+      - name: Check whether manifest changed vs latest release
         id: digest_check
-        run: |
-          set +e
-          LATEST_SHA=$(gh release view --json assets --jq '.assets[] | select(.name=="laws.sha256") | .url' 2>/dev/null \
-            | xargs -r -I{} curl -sL "{}")
-          if [ "$LATEST_SHA" = "${{ steps.bundle.outputs.sha }}" ]; then
-            echo "unchanged=true" >> "$GITHUB_OUTPUT"
-          else
-            echo "unchanged=false" >> "$GITHUB_OUTPUT"
-          fi
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          LATEST_URL=$(gh release view --json assets --jq '.assets[] | select(.name=="laws.sha256") | .url' 2>/dev/null || true)
+          if [ -n "$LATEST_URL" ]; then
+            LATEST_MANIFEST=$(curl -sL "$LATEST_URL")
+            if [ "$LATEST_MANIFEST" = "$(cat data/laws.sha256)" ]; then
+              echo "unchanged=true" >> "$GITHUB_OUTPUT"
+              exit 0
+            fi
+          fi
+          echo "unchanged=false" >> "$GITHUB_OUTPUT"
 
       - name: Compute release stats
         if: steps.digest_check.outputs.unchanged != 'true'
@@ -101,28 +100,30 @@ jobs:
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          TAG="${{ steps.bundle.outputs.tag }}"
-          # Same-day reruns overwrite. Delete release + tag (local + remote)
-          # before recreating, mirroring scriptogre/biomedical-data.
+          TAG="${{ steps.prep.outputs.tag }}"
           gh release delete "$TAG" --yes 2>/dev/null || true
           git tag -d "$TAG" 2>/dev/null || true
           git push origin ":refs/tags/$TAG" 2>/dev/null || true
 
-          echo "${{ steps.bundle.outputs.sha }}" > laws.sha256
-          BUNDLE_SIZE=$(du -h laws.tar.gz | cut -f1)
+          cd data
           gh release create "$TAG" \
-            laws.tar.gz laws.sha256 \
-            --title "${{ steps.bundle.outputs.tag }}" \
+            acte.parquet articole.parquet alineate.parquet fts.duckdb create_views.sql laws.sha256 \
+            --title "$TAG" \
             --notes "$(cat <<EOF
           Romanian legal corpus snapshot.
 
           **Last published act:** ${{ steps.stats.outputs.latest }}
-          **Bundle size:** $BUNDLE_SIZE (zstd-compressed parquet + BM25 index)
 
           ### Counts
           - ${{ steps.stats.outputs.acte }} acte
           - ${{ steps.stats.outputs.articole }} articole
           - ${{ steps.stats.outputs.alineate }} alineate
+
+          ### Assets
+          - \`acte.parquet\` / \`articole.parquet\` / \`alineate.parquet\` — zstd-compressed Parquet
+          - \`fts.duckdb\` — BM25 index over \`articole.content\` (Romanian Snowball stemmer)
+          - \`create_views.sql\` — DuckDB view definitions matching the data shape
+          - \`laws.sha256\` — \`sha256sum\`-compatible manifest
           EOF
           )"
 
