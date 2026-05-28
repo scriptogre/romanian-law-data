@@ -212,6 +212,7 @@ def _flush(writer: pq.ParquetWriter, rows: list[dict], schema: pa.Schema) -> Non
 
 
 def main() -> None:
+    logger.info("export: start (input=stdin)")
     DATA_DIR.mkdir(parents=True, exist_ok=True)
     synced_at = datetime.now(UTC).replace(tzinfo=None)
 
@@ -298,7 +299,8 @@ def main() -> None:
 
             if n_acts % 10_000 == 0:
                 logger.info(
-                    f"streamed {n_acts:>7d} acte / {n_articles:>8d} articole / {n_paragraphs:>9d} alineate"
+                    f"export: progress  acte={n_acts:>7d}  "
+                    f"articole={n_articles:>8d}  alineate={n_paragraphs:>9d}"
                 )
 
         _flush(acts_writer, act_buf, ACTS_SCHEMA)
@@ -312,10 +314,13 @@ def main() -> None:
                 hasher.update(chunk)
     SHA_PATH.write_text(hasher.hexdigest() + "\n")
 
-    logger.success(f"acte:     {n_acts:>8d} rows  → {ACTE_PATH}")
-    logger.success(f"articole: {n_articles:>8d} rows  → {ARTICOLE_PATH}")
-    logger.success(f"alineate: {n_paragraphs:>8d} rows  → {ALINEATE_PATH}")
-    logger.success(f"sha256:     {hasher.hexdigest()}")
+    logger.info(f"  acte:     {n_acts:>8d} rows  → {ACTE_PATH}")
+    logger.info(f"  articole: {n_articles:>8d} rows  → {ARTICOLE_PATH}")
+    logger.info(f"  alineate: {n_paragraphs:>8d} rows  → {ALINEATE_PATH}")
+    logger.info(f"  sha256:   {hasher.hexdigest()}")
+    logger.success(
+        f"export: DONE — {n_acts} acte / {n_articles} articole / {n_paragraphs} alineate"
+    )
 
 
 if __name__ == "__main__":

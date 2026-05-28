@@ -52,22 +52,20 @@ conn.execute("""
 ## Pipeline
 
 ```
-collect.py    SOAP API           → data/raw_acts.jsonl
-normalize.py  → fix encoding, dedup, extract dates + gazette number
-                                 → data/normalized_acts.jsonl
-parse.py      → extract articles + alineate
-                                 → stdout (piped)
-export.py     → write parquet bundle + sha256 from stdin
+collect.py    SOAP API → data/raw_acts.jsonl
+normalize.py  fix encoding, dedup, extract dates + gazette → stdout
+parse.py      extract articles + alineate                  → stdout
+export.py     write parquet bundle + sha256                ← stdin
 ```
 
-`collect` and `normalize` checkpoint to JSONL (resumable). `parse` and `export`
-are piped — no intermediate `parsed.jsonl` on disk.
+`collect` checkpoints `raw_acts.jsonl` (SOAP is slow + rate-limited, worth caching). `normalize → parse → export` is one pipe — no intermediate JSONL on disk.
 
 ```bash
 uv sync
 uv run python -m scripts.collect
-uv run python -m scripts.normalize
-uv run python -m scripts.parse | uv run python -m scripts.export
+uv run python -m scripts.normalize \
+  | uv run python -m scripts.parse \
+  | uv run python -m scripts.export
 ```
 
 ## License

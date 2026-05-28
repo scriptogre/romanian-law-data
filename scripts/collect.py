@@ -140,9 +140,9 @@ async def collect_all(
 
     mode = "a" if resuming else "w"
     if resuming:
-        logger.info(f"resuming from page {page_cursor} (cursor was {cursor})")
+        logger.info(f"collect: start (resuming from page {page_cursor}, cursor was {cursor})")
     else:
-        logger.info(f"fresh run from page {page_cursor}")
+        logger.info(f"collect: start (fresh run from page {page_cursor})")
 
     with output_path.open(mode, encoding="utf-8") as fp:
         while True:
@@ -185,7 +185,7 @@ def main() -> None:
             max_acts=max_acts,
         )
     )
-    logger.success(f"collected {total} acts → {OUTPUT_PATH}")
+    logger.success(f"collect: DONE — {total} acts → {OUTPUT_PATH}")
 
 
 if __name__ == "__main__":

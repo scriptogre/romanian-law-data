@@ -44,11 +44,11 @@ jobs:
       - name: Collect
         run: uv run python -m scripts.collect
 
-      - name: Normalize
-        run: uv run python -m scripts.normalize
-
-      - name: Parse → Export parquet
-        run: uv run python -m scripts.parse | uv run python -m scripts.export
+      - name: Normalize → Parse → Export parquet
+        run: |
+          uv run python -m scripts.normalize \
+            | uv run python -m scripts.parse \
+            | uv run python -m scripts.export
 
       - name: Build FTS index
         run: uv run python -m scripts.build_fts

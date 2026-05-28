@@ -3,8 +3,9 @@ Stage 3 — parse.py
 
 Extract articles + paragraphs (alineate) from each act's plain text.
 
-Reads `data/normalized_acts.jsonl`, writes parsed acts to stdout (one JSONL line
-per act) so the next stage (export.py) can pipe-consume without intermediate
+Reads normalized acts from stdin (one JSONL line per act, as emitted by
+normalize.py) and writes parsed acts to stdout for export.py to pipe-consume.
+Both intermediate files (`normalized_acts.jsonl` and `parsed.jsonl`) stay off
 disk. The per-act diagnostic report still writes to `data/parse_report.jsonl`.
 
 Output shape (per stdout line):
@@ -54,7 +55,6 @@ from pathlib import Path
 
 from loguru import logger
 
-INPUT_PATH = Path(__file__).parent.parent / "data" / "normalized_acts.jsonl"
 REPORT_PATH = Path(__file__).parent.parent / "data" / "parse_report.jsonl"
 
 MIN_ARTICLES_FOR_CLEAN_PARSE = 1
@@ -553,17 +553,23 @@ def parse_act(act: dict) -> dict:
 
 
 def main() -> None:
+    logger.info("parse: start (input=stdin)")
     REPORT_PATH.parent.mkdir(parents=True, exist_ok=True)
     total = 0
     bands: dict[str, int] = {"high": 0, "medium": 0, "low": 0, "intentional-fallback": 0}
     gates: dict[str, int] = {"detection_recall_low": 0, "detection_recall_medium": 0}
     score_sum = 0.0
 
-    with (
-        INPUT_PATH.open(encoding="utf-8") as src,
-        REPORT_PATH.open("w", encoding="utf-8") as report,
-    ):
-        for line in src:
+    with REPORT_PATH.open("w", encoding="utf-8") as report:
+        for line in sys.stdin:
+            if total and total % 10_000 == 0:
+                avg = score_sum / total
+                logger.info(
+                    f"parse: progress  acts={total:>7d}  "
+                    f"high={bands['high']:>5d}  med={bands['medium']:>4d}  "
+                    f"low={bands['low']:>4d}  fallback={bands['intentional-fallback']:>5d}  "
+                    f"mean_score={avg:.3f}"
+                )
             act = json.loads(line)
             parsed = parse_act(act)
             sys.stdout.write(json.dumps(parsed, ensure_ascii=False) + "\n")
@@ -595,7 +601,7 @@ def main() -> None:
             )
 
     avg = score_sum / total if total else 0.0
-    logger.success(f"parsed {total} acts → stdout")
+    logger.success(f"parse: DONE — {total} acts → stdout")
     logger.info(f"  mean quality score:    {avg:.3f}")
     logger.info(
         f"  high   (≥{HIGH_QUALITY}):           {bands['high']:>6d} ({bands['high'] / total:.1%})"

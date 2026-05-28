@@ -40,6 +40,7 @@ MEMORY_LIMIT = os.environ.get("FTS_MEMORY_LIMIT", "8GB")
 
 
 def main() -> None:
+    logger.info(f"build_fts: start (input={ARTICOLE_PATH.name})")
     if not ARTICOLE_PATH.exists():
         raise SystemExit(f"missing input: {ARTICOLE_PATH} — run scripts.export first")
 
@@ -93,7 +94,7 @@ def main() -> None:
         shutil.rmtree(TEMP_DIR, ignore_errors=True)
 
     size_mb = FTS_DB_PATH.stat().st_size / (1024 * 1024)
-    logger.success(f"FTS db ready: {FTS_DB_PATH} ({size_mb:.1f} MB)")
+    logger.success(f"build_fts: DONE — {FTS_DB_PATH} ({size_mb:.1f} MB)")
 
 
 if __name__ == "__main__":

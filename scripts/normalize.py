@@ -30,6 +30,7 @@ Reads `data/raw_acts.jsonl`, writes `data/normalized_acts.jsonl`.
 
 import json
 import re
+import sys
 import unicodedata
 from datetime import date
 from pathlib import Path
@@ -37,7 +38,6 @@ from pathlib import Path
 from loguru import logger
 
 INPUT_PATH = Path(__file__).parent.parent / "data" / "raw_acts.jsonl"
-OUTPUT_PATH = Path(__file__).parent.parent / "data" / "normalized_acts.jsonl"
 
 # Pre-2007 cedilla forms → post-2007 comma-below forms.
 CEDILLA_FIX = str.maketrans(
@@ -250,7 +250,7 @@ def normalize(act: dict) -> dict:
 
 
 def main() -> None:
-    OUTPUT_PATH.parent.mkdir(parents=True, exist_ok=True)
+    logger.info(f"normalize: start (input={INPUT_PATH.name})")
     total = 0
     duplicates_dropped = 0
     emitent_recovered = 0
@@ -261,8 +261,14 @@ def main() -> None:
     number_nulled = 0
     seen_keys: set[tuple[str, str | None]] = set()
 
-    with INPUT_PATH.open(encoding="utf-8") as src, OUTPUT_PATH.open("w", encoding="utf-8") as dst:
+    with INPUT_PATH.open(encoding="utf-8") as src:
         for line in src:
+            if total and total % 10_000 == 0:
+                logger.info(
+                    f"normalize: progress  read={total:>7d}  "
+                    f"unique={total - duplicates_dropped:>7d}  "
+                    f"duplicates={duplicates_dropped:>5d}"
+                )
             act = json.loads(line)
             original_emitent = act.get("Emitent") or ""
             original_numar = (act.get("Numar") or "").strip()
@@ -298,11 +304,10 @@ def main() -> None:
             if original_numar and normalized.get("Numar") is None:
                 number_nulled += 1
 
-            dst.write(json.dumps(normalized, ensure_ascii=False) + "\n")
+            sys.stdout.write(json.dumps(normalized, ensure_ascii=False) + "\n")
             total += 1
 
     unique = total - duplicates_dropped
-    logger.success(f"normalized {unique} unique acts → {OUTPUT_PATH}")
     logger.info(f"  duplicates dropped:           {duplicates_dropped} / {total}")
     logger.info(f"  emitent recovered from Text:  {emitent_recovered} / {unique}")
     logger.info(f"  adopted_at extracted:         {adopted_extracted} / {unique}")
@@ -310,6 +315,7 @@ def main() -> None:
     logger.info(f"  effective_at extracted:       {effective_extracted} / {unique}")
     logger.info(f"  gazette_number extracted:     {gazette_extracted} / {unique}")
     logger.info(f"  number placeholders → NULL:   {number_nulled} / {unique}")
+    logger.success(f"normalize: DONE — {unique} unique acts → stdout")
 
 
 if __name__ == "__main__":
