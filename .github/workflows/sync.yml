@@ -44,12 +44,15 @@ jobs:
       - name: Export parquet
         run: uv run python -m scripts.export
 
+      - name: Build FTS index
+        run: uv run python -m scripts.build_fts
+
       - name: Bundle artifact
         id: bundle
         run: |
           cp create_views.sql data/create_views.sql
           tar -czvf laws.tar.gz -C data \
-            acte.parquet articole.parquet alineate.parquet create_views.sql
+            acte.parquet articole.parquet alineate.parquet fts.duckdb create_views.sql
           NEW_SHA=$(sha256sum laws.tar.gz | awk '{print $1}')
           echo "sha=$NEW_SHA" >> "$GITHUB_OUTPUT"
           echo "tag=laws/$(date -u +%Y-%m-%d)" >> "$GITHUB_OUTPUT"

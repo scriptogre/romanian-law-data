@@ -172,8 +172,15 @@ def _safe_date(year: int, month: int, day: int) -> str | None:
 
 
 def extract_adopted_at(titlu: str, text: str) -> str | None:
-    """Extract the act's adoption / signing date from the title (`din DATE`)."""
-    for source in (titlu or "", (text or "")[:300]):
+    """Extract the act's adoption / signing date from the title (`din DATE`).
+
+    Title is the primary source. When absent (a few thousand acts where SOAP's
+    Titlu doesn't carry the date — typically ORDIN-uri), fall back to the head
+    of Text, where the official header still starts with "TIP nr. N din DATE".
+    2_000 chars is generous enough to clear the EMITENT block + header but
+    short enough to avoid catching dates from cited acts in the body.
+    """
+    for source in (titlu or "", (text or "")[:2000]):
         match = DATE_RE.search(source.lower())
         if not match:
             continue

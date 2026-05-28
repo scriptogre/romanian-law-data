@@ -169,7 +169,14 @@ def _canonical_citation(
     adopted_at,
     issuer: str | None,
 ) -> str:
-    """Build the citation a Romanian lawyer would type. Always returns a string."""
+    """Build the citation a Romanian lawyer would type. Always returns a string.
+
+    Year comes from `adopted_at` only — published_at (Monitorul Oficial date)
+    can shift across years for acts adopted late December, so using it as a
+    fallback would silently misattribute ~5 acts/year. Acts with no parseable
+    adoption date get a year-less citation like "Ordinul 713" — honest about
+    the missing info; the LLM can disambiguate by issuer / title / link.
+    """
     if not type_:
         return ""
 
