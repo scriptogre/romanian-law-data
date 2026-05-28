@@ -9,6 +9,7 @@ Ported from the previous Django version's `LegislatieJustRoClient`.
 """
 
 import asyncio
+import itertools
 import json
 import os
 import random
@@ -28,7 +29,8 @@ from zeep.transports import Transport
 WSDL = "https://legislatie.just.ro/apiws/FreeWebService.svc?wsdl"
 PAGE_SIZE = 10
 DEFAULT_CONCURRENCY = 16  # bump via ETL_CONCURRENCY env var when the runner allows more
-POOL_SIZE = 128  # must comfortably exceed DEFAULT_CONCURRENCY
+POOL_SIZE = 128  # connection pool — must comfortably exceed DEFAULT_CONCURRENCY
+DEFAULT_TOKEN_POOL_SIZE = 4  # rotate tokens to defeat per-token rate-limit (if any)
 TOKEN_TTL_SECONDS = 60
 MAX_RETRIES = 20
 INITIAL_BACKOFF = 1.0
@@ -54,7 +56,7 @@ class RawAct:
 
 
 class LegislatieJustRoClient:
-    def __init__(self) -> None:
+    def __init__(self, token_pool_size: int = DEFAULT_TOKEN_POOL_SIZE) -> None:
         self.session = Session()
         self.session.mount(
             "https://",
@@ -70,24 +72,43 @@ class LegislatieJustRoClient:
             "Chrome/120.0.0.0 Safari/537.36"
         )
         self.client = Client(WSDL, transport=transport)
-        self.token: str | None = None
-        self.token_time = 0.0
-        # Serialise token refresh — without it, N concurrent threads racing on
-        # an expired token each issue their own GetToken request, wasting both
-        # client throughput and (politely) server cycles.
+        # Token pool: round-robin across N tokens to defeat per-token rate-limit
+        # (if SOAP enforces one). 1 = legacy single-token behavior.
+        self.token_pool_size = max(1, token_pool_size)
+        self.tokens: list[str] = []
+        self.token_times: list[float] = []
+        self._token_counter = itertools.count()
         self._token_lock = threading.Lock()
 
     def __del__(self) -> None:
         self.session.close()
 
-    def _refresh_token(self) -> None:
-        if time.time() - self.token_time <= TOKEN_TTL_SECONDS:
+    def _ensure_tokens(self) -> None:
+        """Initialise / refresh the token pool. Thread-safe."""
+        now = time.time()
+        # Fast path: pool full and no token expired.
+        if (
+            len(self.tokens) == self.token_pool_size
+            and all(now - t <= TOKEN_TTL_SECONDS for t in self.token_times)
+        ):
             return
         with self._token_lock:
-            # Re-check under the lock — another thread may have just refreshed.
-            if time.time() - self.token_time > TOKEN_TTL_SECONDS:
-                self.token = self.client.service.GetToken()
-                self.token_time = time.time()
+            now = time.time()
+            # Initialise on first call.
+            while len(self.tokens) < self.token_pool_size:
+                self.tokens.append(self.client.service.GetToken())
+                self.token_times.append(now)
+            # Refresh any expired entries within the same lock — keeps the
+            # GetToken call rate bounded even under high fetch concurrency.
+            for i in range(self.token_pool_size):
+                if now - self.token_times[i] > TOKEN_TTL_SECONDS:
+                    self.tokens[i] = self.client.service.GetToken()
+                    self.token_times[i] = now
+
+    def _next_token(self) -> str:
+        self._ensure_tokens()
+        idx = next(self._token_counter) % self.token_pool_size
+        return self.tokens[idx]
 
     def fetch_page(self, page: int) -> list[dict]:
         """Fetch one page of acts. Exponential backoff with jitter on failure."""
@@ -98,10 +119,9 @@ class LegislatieJustRoClient:
 
         for attempt in range(MAX_RETRIES):
             try:
-                self._refresh_token()
                 result = self.client.service.Search(
                     SearchModel=model,
-                    tokenKey=self.token,
+                    tokenKey=self._next_token(),
                 )
                 return [serialize_object(item) for item in (result or [])]
             except Exception:
@@ -132,6 +152,7 @@ def _write_cursor(page: int) -> None:
 async def collect_all(
     *,
     concurrency: int = DEFAULT_CONCURRENCY,
+    token_pool_size: int = DEFAULT_TOKEN_POOL_SIZE,
     start_page: int | None = None,
     max_acts: int | None = None,
     output_path: Path = OUTPUT_PATH,
@@ -143,7 +164,7 @@ async def collect_all(
     Pass `start_page` explicitly to override / force a fresh run.
     """
     output_path.parent.mkdir(parents=True, exist_ok=True)
-    client = LegislatieJustRoClient()
+    client = LegislatieJustRoClient(token_pool_size=token_pool_size)
     total = 0
 
     cursor = _read_cursor()
@@ -154,13 +175,14 @@ async def collect_all(
         page_cursor = start_page
 
     mode = "a" if resuming else "w"
-    if resuming:
-        logger.info(
-            f"collect: start (resuming from page {page_cursor}, cursor was {cursor}, "
-            f"concurrency={concurrency})"
-        )
-    else:
-        logger.info(f"collect: start (fresh run from page {page_cursor}, concurrency={concurrency})")
+    state = (
+        f"resuming from page {page_cursor}, cursor was {cursor}"
+        if resuming
+        else f"fresh run from page {page_cursor}"
+    )
+    logger.info(
+        f"collect: start ({state}, concurrency={concurrency}, tokens={token_pool_size})"
+    )
 
     start_time = time.time()
     with output_path.open(mode, encoding="utf-8") as fp:
@@ -199,12 +221,14 @@ async def collect_all(
 
 def main() -> None:
     concurrency = int(os.environ.get("ETL_CONCURRENCY", DEFAULT_CONCURRENCY))
+    token_pool_size = int(os.environ.get("ETL_TOKEN_POOL_SIZE", DEFAULT_TOKEN_POOL_SIZE))
     max_acts = int(os.environ["ETL_MAX_ACTS"]) if "ETL_MAX_ACTS" in os.environ else None
     start_page = int(os.environ["ETL_START_PAGE"]) if "ETL_START_PAGE" in os.environ else None
 
     total = asyncio.run(
         collect_all(
             concurrency=concurrency,
+            token_pool_size=token_pool_size,
             start_page=start_page,
             max_acts=max_acts,
         )
