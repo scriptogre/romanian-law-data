@@ -11,6 +11,8 @@ Ported from the previous Django version's `LegislatieJustRoClient`.
 import asyncio
 import json
 import os
+import random
+import threading
 import time
 from dataclasses import dataclass
 from itertools import chain
@@ -25,11 +27,13 @@ from zeep.transports import Transport
 
 WSDL = "https://legislatie.just.ro/apiws/FreeWebService.svc?wsdl"
 PAGE_SIZE = 10
-DEFAULT_CONCURRENCY = 8
+DEFAULT_CONCURRENCY = 16  # bump via ETL_CONCURRENCY env var when the runner allows more
+POOL_SIZE = 128  # must comfortably exceed DEFAULT_CONCURRENCY
 TOKEN_TTL_SECONDS = 60
 MAX_RETRIES = 20
 INITIAL_BACKOFF = 1.0
 MAX_BACKOFF = 60.0
+BACKOFF_JITTER = 0.5  # multiplies delay by uniform(1 - JITTER, 1 + JITTER)
 
 OUTPUT_PATH = Path(__file__).parent.parent / "data" / "raw_acts.jsonl"
 CURSOR_PATH = Path(__file__).parent.parent / "data" / ".collect_cursor"
@@ -54,7 +58,7 @@ class LegislatieJustRoClient:
         self.session = Session()
         self.session.mount(
             "https://",
-            HTTPAdapter(pool_connections=50, pool_maxsize=50),
+            HTTPAdapter(pool_connections=POOL_SIZE, pool_maxsize=POOL_SIZE),
         )
         # zeep's Transport.__init__ clobbers session User-Agent with "Zeep/...",
         # which legislatie.just.ro rejects with 403. Override AFTER Transport
@@ -68,17 +72,25 @@ class LegislatieJustRoClient:
         self.client = Client(WSDL, transport=transport)
         self.token: str | None = None
         self.token_time = 0.0
+        # Serialise token refresh — without it, N concurrent threads racing on
+        # an expired token each issue their own GetToken request, wasting both
+        # client throughput and (politely) server cycles.
+        self._token_lock = threading.Lock()
 
     def __del__(self) -> None:
         self.session.close()
 
     def _refresh_token(self) -> None:
-        if time.time() - self.token_time > TOKEN_TTL_SECONDS:
-            self.token = self.client.service.GetToken()
-            self.token_time = time.time()
+        if time.time() - self.token_time <= TOKEN_TTL_SECONDS:
+            return
+        with self._token_lock:
+            # Re-check under the lock — another thread may have just refreshed.
+            if time.time() - self.token_time > TOKEN_TTL_SECONDS:
+                self.token = self.client.service.GetToken()
+                self.token_time = time.time()
 
     def fetch_page(self, page: int) -> list[dict]:
-        """Fetch one page of acts. Exponential backoff on failure."""
+        """Fetch one page of acts. Exponential backoff with jitter on failure."""
         SearchModel = self.client.get_type(
             "{http://schemas.datacontract.org/2004/07/FreeWebService}CompositeType"
         )
@@ -95,8 +107,11 @@ class LegislatieJustRoClient:
             except Exception:
                 if attempt == MAX_RETRIES - 1:
                     raise
-                delay = min(MAX_BACKOFF, INITIAL_BACKOFF * (2**attempt))
-                logger.warning(f"page {page} retry {attempt + 1}/{MAX_RETRIES} in {delay}s")
+                base = min(MAX_BACKOFF, INITIAL_BACKOFF * (2**attempt))
+                delay = base * random.uniform(1 - BACKOFF_JITTER, 1 + BACKOFF_JITTER)
+                logger.warning(
+                    f"page {page} retry {attempt + 1}/{MAX_RETRIES} in {delay:.1f}s"
+                )
                 time.sleep(delay)
         return []
 
@@ -140,10 +155,14 @@ async def collect_all(
 
     mode = "a" if resuming else "w"
     if resuming:
-        logger.info(f"collect: start (resuming from page {page_cursor}, cursor was {cursor})")
+        logger.info(
+            f"collect: start (resuming from page {page_cursor}, cursor was {cursor}, "
+            f"concurrency={concurrency})"
+        )
     else:
-        logger.info(f"collect: start (fresh run from page {page_cursor})")
+        logger.info(f"collect: start (fresh run from page {page_cursor}, concurrency={concurrency})")
 
+    start_time = time.time()
     with output_path.open(mode, encoding="utf-8") as fp:
         while True:
             batch = range(page_cursor, page_cursor + concurrency)
@@ -162,7 +181,12 @@ async def collect_all(
             total += len(acts)
             _write_cursor(page_cursor + concurrency - 1)
 
-            logger.info(f"pages {list(batch)}: +{len(acts)} acts (total {total})")
+            elapsed = time.time() - start_time
+            rate = total / elapsed if elapsed > 0 else 0.0
+            logger.info(
+                f"pages [{batch.start}..{batch.stop - 1}]: +{len(acts)} acts  "
+                f"total={total:>6d}  rate={rate:>5.0f} acts/s"
+            )
 
             if max_acts is not None and total >= max_acts:
                 logger.info(f"reached max_acts={max_acts}, stopping")
