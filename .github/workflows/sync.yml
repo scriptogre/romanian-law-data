@@ -1,0 +1,88 @@
+name: sync
+
+on:
+  schedule:
+    - cron: "0 3 * * *"
+  workflow_dispatch:
+    inputs:
+      max_acts:
+        description: "Cap total acts (for smoke runs). Leave empty for full sync."
+        required: false
+        type: string
+
+permissions:
+  contents: write
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    timeout-minutes: 360
+    env:
+      ETL_MAX_ACTS: ${{ inputs.max_acts }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: astral-sh/setup-uv@v3
+        with:
+          enable-cache: true
+
+      - name: Setup Python
+        run: uv python install 3.12
+
+      - name: Install deps
+        run: uv sync
+
+      - name: Collect
+        run: uv run python -m scripts.collect
+
+      - name: Normalize
+        run: uv run python -m scripts.normalize
+
+      - name: Parse
+        run: uv run python -m scripts.parse
+
+      - name: Export parquet
+        run: uv run python -m scripts.export
+
+      - name: Bundle artifact
+        id: bundle
+        run: |
+          cp create_views.sql data/create_views.sql
+          tar -czvf laws.tar.gz -C data \
+            acte.parquet articole.parquet alineate.parquet create_views.sql
+          NEW_SHA=$(sha256sum laws.tar.gz | awk '{print $1}')
+          echo "sha=$NEW_SHA" >> "$GITHUB_OUTPUT"
+          echo "tag=laws/$(date -u +%Y-%m-%d)" >> "$GITHUB_OUTPUT"
+
+      - name: Check whether digest changed vs latest release
+        id: digest_check
+        run: |
+          set +e
+          LATEST_SHA=$(gh release view --json assets --jq '.assets[] | select(.name=="laws.sha256") | .url' 2>/dev/null \
+            | xargs -r -I{} curl -sL "{}")
+          if [ "$LATEST_SHA" = "${{ steps.bundle.outputs.sha }}" ]; then
+            echo "unchanged=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "unchanged=false" >> "$GITHUB_OUTPUT"
+          fi
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Publish release
+        if: steps.digest_check.outputs.unchanged != 'true'
+        run: |
+          echo "${{ steps.bundle.outputs.sha }}" > laws.sha256
+          gh release create "${{ steps.bundle.outputs.tag }}" \
+            laws.tar.gz laws.sha256 \
+            --title "${{ steps.bundle.outputs.tag }}" \
+            --notes "Daily corpus sync."
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Upload parse report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: parse-report
+          path: data/parse_report.jsonl
+          if-no-files-found: ignore
