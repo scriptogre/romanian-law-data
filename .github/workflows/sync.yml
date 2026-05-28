@@ -20,6 +20,15 @@ jobs:
     env:
       ETL_MAX_ACTS: ${{ inputs.max_acts }}
     steps:
+      - name: Free disk space
+        uses: jlumbroso/free-disk-space@main
+        with:
+          android: true
+          dotnet: true
+          haskell: true
+          large-packages: true
+          swap-storage: false
+
       - uses: actions/checkout@v4
 
       - uses: astral-sh/setup-uv@v3
@@ -71,14 +80,44 @@ jobs:
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
+      - name: Compute release stats
+        if: steps.digest_check.outputs.unchanged != 'true'
+        id: stats
+        run: |
+          uv run python -c "
+          import duckdb
+          c = duckdb.connect()
+          row = c.execute('''
+              SELECT
+                  (SELECT count(*) FROM read_parquet(\"data/acte.parquet\")) AS acte,
+                  (SELECT count(*) FROM read_parquet(\"data/articole.parquet\")) AS articole,
+                  (SELECT count(*) FROM read_parquet(\"data/alineate.parquet\")) AS alineate,
+                  (SELECT max(published_at) FROM read_parquet(\"data/acte.parquet\")) AS latest
+          ''').fetchone()
+          for k, v in zip(['acte', 'articole', 'alineate', 'latest'], row):
+              print(f'{k}={v}')
+          " >> "$GITHUB_OUTPUT"
+
       - name: Publish release
         if: steps.digest_check.outputs.unchanged != 'true'
         run: |
           echo "${{ steps.bundle.outputs.sha }}" > laws.sha256
+          BUNDLE_SIZE=$(du -h laws.tar.gz | cut -f1)
           gh release create "${{ steps.bundle.outputs.tag }}" \
             laws.tar.gz laws.sha256 \
             --title "${{ steps.bundle.outputs.tag }}" \
-            --notes "Daily corpus sync."
+            --notes "$(cat <<EOF
+          Romanian legal corpus snapshot.
+
+          **Last published act:** ${{ steps.stats.outputs.latest }}
+          **Bundle size:** $BUNDLE_SIZE (zstd-compressed parquet + BM25 index)
+
+          ### Counts
+          - ${{ steps.stats.outputs.acte }} acte
+          - ${{ steps.stats.outputs.articole }} articole
+          - ${{ steps.stats.outputs.alineate }} alineate
+          EOF
+          )"
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
