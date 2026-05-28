@@ -18,10 +18,14 @@ index-build cost. Query shape:
     ORDER BY score DESC LIMIT 20;
 
 The build peaks around 3-4 GB of working memory on ~1M articles. We cap
-`memory_limit` to 2 GB and let DuckDB spill to disk via `temp_directory`,
-so the job runs on a laptop or a 7 GB GitHub Actions runner.
+`memory_limit` to 8 GB by default (well under the 16 GB on a public-repo
+`ubuntu-latest` runner) and let DuckDB spill to disk via `temp_directory`
+if the cap is hit. Override with `FTS_MEMORY_LIMIT` env var — e.g. set to
+'2GB' when running on a memory-constrained laptop, '12GB' on a beefy
+machine for the fastest build.
 """
 
+import os
 import shutil
 from pathlib import Path
 
@@ -32,6 +36,7 @@ DATA_DIR = Path(__file__).parent.parent / "data"
 ARTICOLE_PATH = DATA_DIR / "articole.parquet"
 FTS_DB_PATH = DATA_DIR / "fts.duckdb"
 TEMP_DIR = DATA_DIR / "_fts_temp"
+MEMORY_LIMIT = os.environ.get("FTS_MEMORY_LIMIT", "8GB")
 
 
 def main() -> None:
@@ -48,10 +53,11 @@ def main() -> None:
     try:
         con.execute("INSTALL fts")
         con.execute("LOAD fts")
-        con.execute("SET memory_limit='2GB'")
+        con.execute(f"SET memory_limit='{MEMORY_LIMIT}'")
         con.execute("SET threads=2")
         con.execute(f"SET temp_directory='{TEMP_DIR}'")
         con.execute("SET preserve_insertion_order=false")
+        logger.info(f"memory_limit={MEMORY_LIMIT} (override via FTS_MEMORY_LIMIT)")
 
         logger.info(f"materialising articole_fts from {ARTICOLE_PATH} ...")
         con.execute(
