@@ -44,7 +44,7 @@ COMMENT ON COLUMN acte.number IS
 'Numărul oficial al actului EXACT cum este returnat de SOAP: de obicei doar numărul ("287", "75"), uneori "număr/an" ("286/2009"). NULL pentru documente fără număr distinct (COMUNICAT-uri ÎCCJ, RAPORT-uri, CUANTUM TOTAL, RECTIFICARI, și — important — pentru CODURI și CONSTITUȚIE, care sunt stocate cu type = "CODUL CIVIL" / "CODUL PENAL" / "CONSTITUȚIE" și number IS NULL, chiar dacă în vorbire sunt citate ca "Legea 287/2009" etc). PENTRU CĂUTARE DUPĂ CITAREA OBIȘNUITĂ ("Legea 287/2009", "OUG 100/2024", "Codul Civil") FOLOSEȘTE `canonical_citation`, NU `number`.';
 
 COMMENT ON COLUMN acte.canonical_citation IS
-'Citarea canonică, în forma pe care o folosesc juriștii români: "Legea 287/2009", "OUG 100/2024", "HG 405/2026", "Ordinul 744/2026", "Decretul 251/2026", "Decizia 175/2025", "Codul Civil", "Codul Penal", "Constituția României". Calculată din (type, number, adopted_at, issuer) la ETL. ACEASTA ESTE COLOANA DE FOLOSIT pentru lookup direct după o referință legală cunoscută — ex: `WHERE canonical_citation = ''Legea 287/2009''`. Pentru acte fără număr, conține "{tip} din YYYY-MM-DD" (ex: "Comunicatul din 2025-04-15"). Pentru coduri și Constituție conține numele canonic (mai multe republicări împart aceeași citation — folosește lentilele dedicate `cod_civil` / `constitutie` / ... pentru forma în vigoare).';
+'Citarea canonică, în forma pe care o folosesc juriștii români: "Legea 287/2009", "OUG 100/2024", "HG 405/2026", "Ordinul 744/2026", "Decretul 251/2026", "Decizia 175/2025", "Codul Civil", "Codul Penal", "Constituția României". Calculată din (type, number, adopted_at, issuer) la ETL. ACEASTA ESTE COLOANA DE FOLOSIT pentru lookup direct după o referință legală cunoscută — ex: `WHERE canonical_citation = ''Legea 287/2009''`. Pentru acte fără număr, conține "{tip} din YYYY-MM-DD" (ex: "Comunicatul din 2025-04-15"). Pentru coduri și Constituție conține numele canonic (mai multe republicări împart aceeași citation — folosește view-urile dedicate `cod_civil` / `constitutie` / ... pentru forma în vigoare).';
 
 COMMENT ON COLUMN acte.issuer IS
 'Autoritatea emitentă, în majuscule, exact cum apare în antetul actului din Monitorul Oficial. Exemple: "PARLAMENTUL ROMÂNIEI" (pentru legi), "GUVERNUL ROMÂNIEI" (pentru OUG, OG, HG), "MINISTERUL JUSTIȚIEI", "CURTEA CONSTITUȚIONALĂ" (pentru decizii CCR), "ÎNALTA CURTE DE CASAȚIE ȘI JUSTIȚIE" (pentru decizii ÎCCJ), "PREȘEDINTELE ROMÂNIEI" (pentru decrete). Pentru ordine comune (joint orders), conține toți emitenții separați prin " / " — ex: "MINISTERUL FINANȚELOR / MINISTERUL DEZVOLTĂRII".';
@@ -140,7 +140,7 @@ COMMENT ON COLUMN alineate.content IS
 -- fă JOIN cu articole / alineate pe id ↔ act_id.
 
 -- legislatie.just.ro stocheaza fiecare cod consolidat sub un TipAct dedicat
--- (CODUL CIVIL, CODUL PENAL, etc.), nu sub LEGE. Lentilele pe cod filtrează
+-- (CODUL CIVIL, CODUL PENAL, etc.), nu sub LEGE. View-urile pe cod filtrează
 -- pe TipAct + anul adoptării. Codurile cu mai multe republicări (cod proc.
 -- civilă) sunt dezambiguate selectând rândul cu cel mai mult conținut.
 
