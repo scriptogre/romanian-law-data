@@ -59,7 +59,8 @@ jobs:
         run: |
           cp create_views.sql data/create_views.sql
           cd data
-          sha256sum acte.parquet articole.parquet alineate.parquet fts.duckdb create_views.sql > laws.sha256
+          zstd -3 -f --quiet --rm fts.duckdb -o fts.duckdb.zst
+          sha256sum acte.parquet articole.parquet alineate.parquet fts.duckdb.zst create_views.sql > laws.sha256
           echo "tag=laws/$(date -u +%Y-%m-%d)" >> "$GITHUB_OUTPUT"
 
       - name: Check whether manifest changed vs latest release
@@ -107,7 +108,7 @@ jobs:
 
           cd data
           gh release create "$TAG" \
-            acte.parquet articole.parquet alineate.parquet fts.duckdb create_views.sql laws.sha256 \
+            acte.parquet articole.parquet alineate.parquet fts.duckdb.zst create_views.sql laws.sha256 \
             --title "$TAG" \
             --notes "$(cat <<EOF
           Romanian legal corpus snapshot.
@@ -121,7 +122,7 @@ jobs:
 
           ### Assets
           - \`acte.parquet\` / \`articole.parquet\` / \`alineate.parquet\` — zstd-compressed Parquet
-          - \`fts.duckdb\` — BM25 index over \`articole.content\` (Romanian Snowball stemmer)
+          - \`fts.duckdb.zst\` — BM25 index (Romanian Snowball stemmer); consumer decompresses to \`fts.duckdb\`
           - \`create_views.sql\` — DuckDB view definitions matching the data shape
           - \`laws.sha256\` — \`sha256sum\`-compatible manifest
           EOF
