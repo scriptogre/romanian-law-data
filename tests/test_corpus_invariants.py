@@ -18,10 +18,26 @@ ACTE = DATA_DIR / "acte.parquet"
 ARTICOLE = DATA_DIR / "articole.parquet"
 ALINEATE = DATA_DIR / "alineate.parquet"
 
+# Smoke runs (`just smoke`) produce ~1k acts — too small for the invariant
+# floors and code-specific article counts below. Skip whenever the parquet
+# is obviously a partial slice rather than a full corpus build.
+_FULL_CORPUS_FLOOR = 100_000
+
+
+def _have_full_corpus() -> bool:
+    if not (ACTE.exists() and ARTICOLE.exists() and ALINEATE.exists()):
+        return False
+    c = duckdb.connect(":memory:")
+    try:
+        (n,) = c.execute(f"SELECT count(*) FROM read_parquet('{ACTE}')").fetchone()
+    finally:
+        c.close()
+    return n >= _FULL_CORPUS_FLOOR
+
 
 pytestmark = pytest.mark.skipif(
-    not (ACTE.exists() and ARTICOLE.exists() and ALINEATE.exists()),
-    reason="parquet corpus not built yet — run `just local` (or download release) first",
+    not _have_full_corpus(),
+    reason="full corpus not built — run `just local` (or download release) first; smoke parquets too small",
 )
 
 

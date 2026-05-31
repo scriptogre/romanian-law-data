@@ -10,16 +10,17 @@ import re
 import unicodedata
 
 import polars as pl
+import yaml
 
-from etl.lookups import load
+from etl import LOOKUPS_DIR
 
 # Build the translate table once at import. Keys/values are 1-char strings.
-_CEDILLA_MAP = load("cedilla")
+_CEDILLA_MAP = yaml.safe_load((LOOKUPS_DIR / "cedilla.yaml").read_text(encoding="utf-8"))
 CEDILLA_TRANSLATE = str.maketrans(_CEDILLA_MAP)
 _LEGACY_CHARS = list(_CEDILLA_MAP.keys())
 _MODERN_CHARS = list(_CEDILLA_MAP.values())
 
-_HTML_ENTITY_MAP = load("html_entities")
+_HTML_ENTITY_MAP = yaml.safe_load((LOOKUPS_DIR / "html_entities.yaml").read_text(encoding="utf-8"))
 _ENTITY_KEYS = list(_HTML_ENTITY_MAP.keys())
 _ENTITY_VALUES = list(_HTML_ENTITY_MAP.values())
 # Single-pass alternation for the Python helper. Matches the Polars
@@ -28,8 +29,10 @@ _ENTITY_RE = re.compile("|".join(re.escape(k) for k in _ENTITY_KEYS))
 
 REPLACEMENT_CHAR = "�"
 
-# Columns that get the full text-cleaning pass.
-_TEXT_COLS = ["Titlu", "Text", "Emitent", "Publicatie"]
+# Columns that get the full text-cleaning pass. TipAct is included so legacy
+# cedilla (CONDIŢII, ORDONANŢĂ MILITARĂ) and any decomposed/entity-encoded
+# glyphs there get normalised the same as the rest.
+_TEXT_COLS = ["Titlu", "Text", "Emitent", "Publicatie", "TipAct"]
 
 
 # ── Pure helpers (testable in isolation) ────────────────────────────────────

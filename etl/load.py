@@ -43,7 +43,9 @@ import pyarrow as pa
 import pyarrow.parquet as pq
 from loguru import logger
 
-from etl.lookups import load as load_lookup
+import yaml
+
+from etl import LOOKUPS_DIR
 
 REPO_ROOT = Path(__file__).parent.parent
 DATA_DIR = REPO_ROOT / "data"
@@ -57,9 +59,13 @@ FTS_MEMORY_LIMIT = os.environ.get("FTS_MEMORY_LIMIT", "8GB")
 
 
 # Shorthand for the most common act types. Unmapped types fall back to title-case.
-TYPE_SHORTHAND: dict[str, str] = load_lookup("type_shorthand")
+TYPE_SHORTHAND: dict[str, str] = yaml.safe_load(
+    (LOOKUPS_DIR / "type_shorthand.yaml").read_text(encoding="utf-8")
+)
 # Codes are singletons — multiple republicări share the same canonical name.
-SINGLETON_CITATIONS: dict[str, str] = load_lookup("singleton_citations")
+SINGLETON_CITATIONS: dict[str, str] = yaml.safe_load(
+    (LOOKUPS_DIR / "singleton_citations.yaml").read_text(encoding="utf-8")
+)
 
 
 ACTS_SCHEMA = pa.schema(

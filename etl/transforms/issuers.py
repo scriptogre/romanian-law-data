@@ -14,10 +14,13 @@ import re
 import unicodedata
 
 import polars as pl
+import yaml
 
-from etl.lookups import load
+from etl import LOOKUPS_DIR
 
-ISSUER_ALIASES: dict[str, str] = load("issuer_aliases")
+ISSUER_ALIASES: dict[str, str] = yaml.safe_load(
+    (LOOKUPS_DIR / "issuer_aliases.yaml").read_text(encoding="utf-8")
+)
 
 # Match "EMITENT  <NAME>" terminated by "Nr." (joint orders) or "Publicat".
 EMITENT_RE = re.compile(

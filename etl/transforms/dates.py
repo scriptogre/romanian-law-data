@@ -16,10 +16,13 @@ for impossible dates (e.g. Feb 30) instead of raising.
 import re
 
 import polars as pl
+import yaml
 
-from etl.lookups import load
+from etl import LOOKUPS_DIR
 
-ROMANIAN_MONTHS: dict[str, int] = load("romanian_months")
+ROMANIAN_MONTHS: dict[str, int] = yaml.safe_load(
+    (LOOKUPS_DIR / "romanian_months.yaml").read_text(encoding="utf-8")
+)
 _MONTH_NAMES = list(ROMANIAN_MONTHS.keys())
 _MONTH_NUMS = [f"{v:02d}" for v in ROMANIAN_MONTHS.values()]
 
