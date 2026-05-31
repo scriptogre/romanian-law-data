@@ -19,7 +19,7 @@ jobs:
     timeout-minutes: 360
     env:
       ETL_MAX_ACTS: ${{ inputs.max_acts }}
-      ETL_CONCURRENCY: "12"
+      ETL_CONCURRENCY: "20"
     steps:
       - name: Free disk space
         uses: jlumbroso/free-disk-space@main

@@ -148,17 +148,9 @@ class LegislatieJustRoClient:
                 time.sleep(delay)
         return []
 
-    def fetch_actiuni(self, act_id: str) -> dict[str, str]:
-        """Fetch both per-act action endpoints. Returns {key: raw_html}.
-
-        Keys are snake_case (`actiuni_suferite`, `actiuni_induse`) to mark
-        them as ours, not SOAP. Always returns both keys; a persistently
-        failing endpoint yields "" so the act still gets written.
-        """
-        return {
-            re.sub(r"(?<!^)(?=[A-Z])", "_", ep).lower(): self._fetch_action(ep, act_id)
-            for ep in ACTION_ENDPOINTS
-        }
+    def fetch_action(self, endpoint: str, act_id: str) -> str:
+        """Public alias for the per-endpoint fetcher (used by async fanout)."""
+        return self._fetch_action(endpoint, act_id)
 
     def _fetch_action(self, endpoint: str, act_id: str) -> str:
         """POST one action endpoint, unwrap {"acte": html}. "" on giving up."""
@@ -188,9 +180,24 @@ def _act_id_from_link(link: str | None) -> str | None:
     return match.group(1) if match else None
 
 
-async def _empty_actiuni() -> dict[str, str]:
-    """Action keys with empty HTML, for acts whose LinkHtml carries no id."""
-    return {re.sub(r"(?<!^)(?=[A-Z])", "_", ep).lower(): "" for ep in ACTION_ENDPOINTS}
+_ACTION_KEY = {ep: re.sub(r"(?<!^)(?=[A-Z])", "_", ep).lower() for ep in ACTION_ENDPOINTS}
+
+
+async def _fetch_actiuni_parallel(
+    client: "LegislatieJustRoClient", act_id: str | None
+) -> dict[str, str]:
+    """Fan out the per-act action endpoints in parallel. Returns {snake_case: html}.
+
+    Earlier the two POSTs ran sequentially inside one thread, which doubled
+    the per-act latency and capped the full sync at ~3 acts/s. Firing them
+    concurrently halves per-act wall time.
+    """
+    if not act_id:
+        return {key: "" for key in _ACTION_KEY.values()}
+    htmls = await asyncio.gather(
+        *(asyncio.to_thread(client.fetch_action, ep, act_id) for ep in ACTION_ENDPOINTS)
+    )
+    return dict(zip(_ACTION_KEY.values(), htmls))
 
 
 def _read_cursor() -> int | None:
@@ -254,17 +261,12 @@ async def extract_all(
                 CURSOR_PATH.unlink(missing_ok=True)
                 break
 
-            # Enrich each act with its action HTML. Run the whole batch's
-            # fetches concurrently so this rides alongside the SOAP paging
-            # instead of serialising 2 POSTs behind every act.
+            # Enrich each act with its action HTML. Per-batch fan-out: both
+            # endpoints of every act run concurrently in worker threads so the
+            # bottleneck is the slowest single POST, not the sequential pair.
             act_ids = [_act_id_from_link(act.get("LinkHtml")) for act in acts]
             actiuni = await asyncio.gather(
-                *(
-                    asyncio.to_thread(client.fetch_actiuni, aid)
-                    if aid
-                    else _empty_actiuni()
-                    for aid in act_ids
-                )
+                *(_fetch_actiuni_parallel(client, aid) for aid in act_ids)
             )
             for act, extra in zip(acts, actiuni):
                 act.update(extra)
