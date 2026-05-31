@@ -1,11 +1,9 @@
 """
-Stage 1 — collect.py
+Stage 1 — extract.py
 
 Fetch every act from `legislatie.just.ro` via its SOAP API. Pages return 10
 acts each. Output: `data/raw_acts.jsonl`, one JSON object per line, fields
 mirror the SOAP response verbatim.
-
-Ported from the previous Django version's `LegislatieJustRoClient`.
 """
 
 import asyncio
@@ -38,7 +36,7 @@ MAX_BACKOFF = 60.0
 BACKOFF_JITTER = 0.5  # multiplies delay by uniform(1 - JITTER, 1 + JITTER)
 
 OUTPUT_PATH = Path(__file__).parent.parent / "data" / "raw_acts.jsonl"
-CURSOR_PATH = Path(__file__).parent.parent / "data" / ".collect_cursor"
+CURSOR_PATH = Path(__file__).parent.parent / "data" / ".extract_cursor"
 
 
 @dataclass
@@ -149,7 +147,7 @@ def _write_cursor(page: int) -> None:
     CURSOR_PATH.write_text(str(page))
 
 
-async def collect_all(
+async def extract_all(
     *,
     concurrency: int = DEFAULT_CONCURRENCY,
     token_pool_size: int = DEFAULT_TOKEN_POOL_SIZE,
@@ -159,7 +157,7 @@ async def collect_all(
 ) -> int:
     """Walk every page, append each act as JSONL. Returns total acts written.
 
-    Resumable. If `data/.collect_cursor` exists, picks up from the page AFTER
+    Resumable. If `data/.extract_cursor` exists, picks up from the page AFTER
     the last successfully-completed batch and appends to the existing JSONL.
     Pass `start_page` explicitly to override / force a fresh run.
     """
@@ -181,7 +179,7 @@ async def collect_all(
         else f"fresh run from page {page_cursor}"
     )
     logger.info(
-        f"collect: start ({state}, concurrency={concurrency}, tokens={token_pool_size})"
+        f"extract: start ({state}, concurrency={concurrency}, tokens={token_pool_size})"
     )
 
     start_time = time.time()
@@ -231,14 +229,14 @@ def main() -> None:
     start_page = int(start_page_raw) if start_page_raw else None
 
     total = asyncio.run(
-        collect_all(
+        extract_all(
             concurrency=concurrency,
             token_pool_size=token_pool_size,
             start_page=start_page,
             max_acts=max_acts,
         )
     )
-    logger.success(f"collect: DONE — {total} acts → {OUTPUT_PATH}")
+    logger.success(f"extract: DONE — {total} acts → {OUTPUT_PATH}")
 
 
 if __name__ == "__main__":

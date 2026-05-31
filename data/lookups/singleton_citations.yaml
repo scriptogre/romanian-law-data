@@ -1,0 +1,15 @@
+# Codes are singletons — multiple republicări share the same canonical name.
+# Used by load.py to build act_citation for code-type acts.
+CONSTITUȚIE: Constituția României
+CODUL CIVIL: Codul Civil
+CODUL PENAL: Codul Penal
+CODUL DE PROCEDURĂ CIVILĂ: Codul de procedură civilă
+CODUL DE PROCEDURĂ PENALĂ: Codul de procedură penală
+CODUL FISCAL: Codul fiscal
+CODUL MUNCII: Codul muncii
+CODUL DE PROCEDURĂ FISCALĂ: Codul de procedură fiscală
+CODUL SILVIC: Codul silvic
+CODUL VAMAL: Codul vamal
+CODUL AERIAN: Codul aerian
+CODUL COMERCIAL: Codul comercial
+CODUL FAMILIEI: Codul familiei

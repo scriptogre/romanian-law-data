@@ -1,0 +1,30 @@
+# Shorthand for the most common act types — produces the form Romanian
+# lawyers actually use in citations (e.g. "Legea 287/2009" not "LEGE 287").
+# Unmapped types fall back to title-case of the raw type.
+#
+# Special case: HG (Hotărâre de Guvern) is only correct for government-issued
+# hotărâri. CCR/ÎCCJ hotărâri use "Hotărârea" — see load.py.
+LEGE: Legea
+ORDONANȚĂ DE URGENȚĂ: OUG
+ORDONANȚĂ: OG
+HOTĂRÂRE: HG
+ORDIN: Ordinul
+DECIZIE: Decizia
+DECRET: Decretul
+DECRET-LEGE: Decretul-lege
+REGULAMENT: Regulamentul
+RECTIFICARE: Rectificarea
+NORMĂ: Norma
+METODOLOGIE: Metodologia
+COMUNICAT: Comunicatul
+PROCEDURĂ: Procedura
+ANEXĂ: Anexa
+CIRCULARĂ: Circulara
+INSTRUCȚIUNI: Instrucțiunile
+RAPORT: Raportul
+ACORD: Acordul
+PROTOCOL: Protocolul
+AMENDAMENT: Amendamentul
+CONVENȚIE: Convenția
+ÎNCHEIERE: Încheierea
+SENTINȚĂ: Sentința

@@ -1,5 +1,12 @@
-data/
+# Everything under data/ is build output or local cache, EXCEPT lookups/.
+data/*
+!data/lookups/
+!data/lookups/**
+
 .venv/
 __pycache__/
 *.pyc
 .env
+
+# Test cache
+.pytest_cache/

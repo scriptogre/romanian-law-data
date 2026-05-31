@@ -11,6 +11,12 @@ dependencies = [
     "loguru>=0.7",
     "httpx>=0.27",
     "duckdb>=1.5.3",
+    "pyyaml>=6.0",
+]
+
+[dependency-groups]
+dev = [
+    "pytest>=8.0",
 ]
 
 [tool.ruff]
@@ -18,3 +24,6 @@ line-length = 100
 
 [tool.ruff.lint]
 extend-select = ["I", "B", "UP"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]

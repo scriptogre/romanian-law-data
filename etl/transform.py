@@ -1,23 +1,20 @@
 """
-Stage 3 — parse.py
+Stage 2 — transform.py
 
-Extract articles + paragraphs (alineate) from each act's plain text.
+Clean each raw SOAP act, then slice its body into articles and paragraphs.
+Reads `data/raw_acts.jsonl` (one JSON object per line, as written by
+extract.py); writes parsed acts to stdout for load.py to pipe-consume.
 
-Reads normalized acts from stdin (one JSONL line per act, as emitted by
-normalize.py) and writes parsed acts to stdout for export.py to pipe-consume.
-Both intermediate files (`normalized_acts.jsonl` and `parsed.jsonl`) stay off
-disk. The per-act diagnostic report still writes to `data/parse_report.jsonl`.
-
-Output shape (per stdout line):
+Each output line has the shape:
 
     {
-        "raw": <normalized act dict>,
+        "raw": { ...normalized act fields... },
         "articles": [
             {
-                "number": 188,                         # INTEGER
-                "number_variant": null | "bis" | ...,  # VARCHAR NULL
+                "number": 188,                          # INTEGER
+                "number_variant": null | "bis" | "^1",  # VARCHAR NULL
                 "full_path": "Art. 188",
-                "content": "...",                       # full article text
+                "content": "...",
                 "paragraphs": [
                     {
                         "number": 1 | null,             # null = whole article, no alineate
@@ -28,34 +25,278 @@ Output shape (per stdout line):
                 ]
             },
             ...
-        ]
+        ],
+        "quality": { score, band, signals, ... }
     }
 
-Quality framework (per-act, 0.0 – 1.0):
-    coverage              30%  sum(article.content) / len(text)
-    detection_recall      25%  detected / expected article markers
-    body_sanity           20%  fraction of articles with content ≥ 20 chars
-    paragraph_contiguity  15%  fraction of multi-paragraph articles where
-                               paragraph numbers form 1,2,3,... starting at 1
-    no_tail_orphan        10%  1 - (chars after last article / total chars)
+The per-act diagnostic report still writes to `data/parse_report.jsonl`.
 
-Bands reported at end of run:
-    high quality   (≥0.85)
-    medium quality (0.5 – 0.85)
-    low quality    (<0.5)
+What the normalize-half fixes in the raw SOAP response:
+
+1. Cedilla → comma-below. SOAP `Titlu` uses pre-2007 Romanian orthography
+   (`ţ`, `ş`); `Text` already uses the modern forms. Translated via
+   `data/lookups/cedilla.yaml`.
+2. `Emitent` recovery. SOAP `Emitent` has non-ASCII chars replaced with `?`
+   ("Curtea Constitu?ională"). Re-extracted from the `Text` header which
+   starts with a clean "EMITENT NAME" block in proper UTF-8. For joint
+   orders, captures the FIRST issuer only.
+3. `Titlu` cleanup. SOAP appends "EMITENT ... PUBLICAT ÎN ..." after the
+   real title; we strip it. Whitespace collapsed.
+4. `Numar` placeholder. SOAP returns "0" for acts that have no number;
+   stored as NULL.
+5. Three dates extracted explicitly:
+     adopted_at      from Titlu "din DD luna YYYY"
+     published_at    from Text  "MONITORUL OFICIAL nr. N din DD luna YYYY"
+     effective_at    from SOAP  DataVigoare (ISO date string)
+6. `gazette_number` extracted from the same MO publication phrase.
+7. Dedup by (normalized Titlu, Emitent) — SOAP returns the same act on
+   adjacent pages sometimes.
+
+What the parse-half does on the cleaned text:
+
+1. Slices text into articles by `ARTICLE_RE` markers; falls back to a
+   single "(unparsed)" article holding the whole text when no markers match.
+2. Slices each article into paragraphs by `PARAGRAPH_RE`; falls back to one
+   NULL-numbered paragraph holding the whole article.
+3. Scores each act on five signals (coverage, detection_recall, body_sanity,
+   paragraph_contiguity, no_tail_orphan) with a detection-recall gate that
+   caps the band when articles were silently dropped.
+
+Quality bands reported at end of run:
+    high quality           (≥0.85)
+    medium quality         (0.50 – 0.85)
+    low quality            (<0.50)
     intentional fallback   — no article markers AND not expected to have any
-
-Per-act scores written to `data/parse_report.jsonl`.
 """
 
 import json
 import re
 import sys
+import unicodedata
+from datetime import date
 from pathlib import Path
 
+import yaml
 from loguru import logger
 
-REPORT_PATH = Path(__file__).parent.parent / "data" / "parse_report.jsonl"
+REPO_ROOT = Path(__file__).parent.parent
+INPUT_PATH = REPO_ROOT / "data" / "raw_acts.jsonl"
+REPORT_PATH = REPO_ROOT / "data" / "parse_report.jsonl"
+LOOKUPS_DIR = REPO_ROOT / "data" / "lookups"
+
+
+def _load_yaml(name: str) -> dict:
+    with (LOOKUPS_DIR / f"{name}.yaml").open(encoding="utf-8") as f:
+        return yaml.safe_load(f)
+
+
+# Pre-2007 cedilla → modern comma-below diacritics. Loaded as a translate table.
+CEDILLA_FIX = str.maketrans(_load_yaml("cedilla"))
+
+ROMANIAN_MONTHS: dict[str, int] = _load_yaml("romanian_months")
+
+
+# ── Normalize-half: regex patterns ──────────────────────────────────────────
+
+# "din DD luna YYYY" — used for adopted_at extraction from Titlu.
+DATE_RE = re.compile(
+    r"din\s+(?P<day>\d{1,2})\s+(?P<month>" + "|".join(ROMANIAN_MONTHS) + r")\s+(?P<year>\d{4})",
+    re.IGNORECASE,
+)
+
+# "MONITORUL OFICIAL nr. <number> din DD luna YYYY" — gazette + publication date.
+# Number may use Romanian thousands separator: "nr. 1.216". Optional suffix "bis"
+# / "bis I" denotes a supplementary issue with the same number.
+MO_RE = re.compile(
+    r"MONITORUL\s+OFICIAL[^\d]*?nr\.\s*(?P<number>[\d.]+)"
+    r"(?:\s*bis(?:\s+[IVX]+)?)?"
+    r"[^\d]*?din\s+(?P<day>\d{1,2})\s+(?P<month>"
+    + "|".join(ROMANIAN_MONTHS)
+    + r")\s+(?P<year>\d{4})",
+    re.IGNORECASE | re.DOTALL,
+)
+
+# Match "EMITENT  <NAME>" terminated by "Nr." (joint orders) or "Publicat".
+EMITENT_RE = re.compile(
+    r"EMITENT\s+(?P<name>.+?)\s+(?:Nr\.|Publicat|Republicat)",
+    re.IGNORECASE,
+)
+
+# Top-level Romanian institutional prefixes. When two appear back-to-back in
+# the EMITENT field, the act is a joint order — split with " / " for clarity.
+JOINT_ISSUER_RE = re.compile(
+    r"(?<=[a-zăâîșțA-ZĂÂÎȘȚ])\s+"
+    r"(?=(?:MINISTERUL|AGENȚIA|AUTORITATEA|CONSILIUL|OFICIUL|CASA\s+NAȚIONALĂ|"
+    r"SERVICIUL|BANCA\s+NAȚIONALĂ|ACADEMIA\s+ROMÂNĂ|ÎNALTA\s+CURTE|"
+    r"CURTEA\s+CONSTITUȚIONALĂ)\b)"
+)
+
+
+# ── Normalize-half: text cleaning ───────────────────────────────────────────
+
+
+def fix_cedilla(value: str | None) -> str:
+    return (value or "").translate(CEDILLA_FIX)
+
+
+def strip_bom(value: str) -> str:
+    """Remove leading byte-order marks. SOAP responses often start with U+FEFF."""
+    return value.lstrip("﻿") if value else value
+
+
+def blank_to_none(value: str | None) -> str | None:
+    """Collapse empty / whitespace-only strings to None."""
+    if value is None:
+        return None
+    stripped = value.strip()
+    return stripped or None
+
+
+def number_to_none(value: str | None) -> str | None:
+    """Drop SOAP placeholders. '0' means 'no number assigned'."""
+    cleaned = blank_to_none(value)
+    return None if cleaned == "0" else cleaned
+
+
+def clean_inline_whitespace(value: str) -> str:
+    """Collapse horizontal whitespace and stray `+` markers."""
+    value = re.sub(r"[ \t]*\+[ \t]*", " ", value)
+    value = re.sub(r"[ \t]+", " ", value)
+    return value.strip()
+
+
+def strip_titlu_suffix(value: str) -> str:
+    """Cut the document-header suffix that SOAP appends to Titlu."""
+    return re.sub(r"\s*EMITENT.*$", "", value, flags=re.DOTALL).strip()
+
+
+def clean_text(value: str) -> str:
+    """Like clean_inline_whitespace but preserves newlines (parser needs them)."""
+    value = re.sub(r"[ \t]*\+[ \t]*", " ", value)
+    value = re.sub(r"[ \t]+", " ", value)
+    value = re.sub(r"\n[ \t]+", "\n", value)
+    value = re.sub(r"\n{3,}", "\n\n", value)
+    return value.strip()
+
+
+# ── Normalize-half: emitent extraction ──────────────────────────────────────
+
+
+def canonicalize_emitent(name: str) -> str:
+    """Uppercase issuer names. SOAP returns mixed case (mostly uppercase) for
+    the same institutions ('GUVERNUL' vs 'Guvernul'). Uppercasing is the
+    cheapest canonicalization that still preserves Romanian diacritics.
+    """
+    if not name:
+        return name
+    return name.upper()
+
+
+def extract_emitent(text: str, fallback: str) -> str:
+    if not text:
+        return canonicalize_emitent(fallback)
+    match = EMITENT_RE.search(text)
+    if not match:
+        return canonicalize_emitent(fallback)
+    name = unicodedata.normalize("NFC", match.group("name").strip())
+    name = re.sub(r"\s{2,}", " ", name)
+    name = JOINT_ISSUER_RE.sub(" / ", name)
+    return canonicalize_emitent(name)
+
+
+# ── Normalize-half: date extraction ─────────────────────────────────────────
+
+
+def _safe_date(year: int, month: int, day: int) -> str | None:
+    try:
+        return date(year, month, day).isoformat()
+    except ValueError:
+        return None
+
+
+def extract_adopted_at(titlu: str, text: str) -> str | None:
+    """Extract the act's adoption / signing date from the title (`din DATE`).
+
+    Title is the primary source. When absent (a few thousand acts where SOAP's
+    Titlu doesn't carry the date — typically ORDIN-uri), fall back to the head
+    of Text, where the official header still starts with "TIP nr. N din DATE".
+    2_000 chars is generous enough to clear the EMITENT block + header but
+    short enough to avoid catching dates from cited acts in the body.
+    """
+    for source in (titlu or "", (text or "")[:2000]):
+        match = DATE_RE.search(source.lower())
+        if not match:
+            continue
+        result = _safe_date(
+            int(match.group("year")),
+            ROMANIAN_MONTHS[match.group("month").lower()],
+            int(match.group("day")),
+        )
+        if result:
+            return result
+    return None
+
+
+def extract_gazette(text: str) -> tuple[str | None, int | None]:
+    """Extract (mo_publication_date_iso, mo_issue_number) from the Text header."""
+    if not text:
+        return (None, None)
+    match = MO_RE.search(text)
+    if not match:
+        return (None, None)
+    iso = _safe_date(
+        int(match.group("year")),
+        ROMANIAN_MONTHS[match.group("month").lower()],
+        int(match.group("day")),
+    )
+    raw_number = (match.group("number") or "").replace(".", "")
+    try:
+        number = int(raw_number)
+    except (TypeError, ValueError):
+        number = None
+    return (iso, number)
+
+
+def extract_effective_at(raw_data_vigoare: str | None) -> str | None:
+    """SOAP DataVigoare is already ISO YYYY-MM-DD. Parse defensively."""
+    if not raw_data_vigoare:
+        return None
+    s = raw_data_vigoare.strip()[:10]
+    try:
+        return date.fromisoformat(s).isoformat()
+    except ValueError:
+        return None
+
+
+# ── Normalize-half: top-level ───────────────────────────────────────────────
+
+
+def normalize_act(act: dict) -> dict:
+    """Clean a single raw SOAP act and extract its structured fields."""
+    titlu = strip_titlu_suffix(clean_inline_whitespace(strip_bom(fix_cedilla(act.get("Titlu")))))
+    text = clean_text(strip_bom(fix_cedilla(act.get("Text"))))
+    emitent = extract_emitent(text, fix_cedilla(act.get("Emitent") or ""))
+
+    adopted_at = extract_adopted_at(titlu, text)
+    published_at_str, gazette_number = extract_gazette(text)
+    effective_at = extract_effective_at(act.get("DataVigoare"))
+
+    return {
+        "Titlu": blank_to_none(titlu),
+        "Text": blank_to_none(text),
+        "TipAct": blank_to_none(act.get("TipAct")),
+        "Numar": number_to_none(act.get("Numar")),
+        "Emitent": blank_to_none(emitent),
+        "Publicatie": blank_to_none(fix_cedilla(act.get("Publicatie"))),
+        "LinkHtml": blank_to_none(act.get("LinkHtml")),
+        "AdoptedAt": adopted_at,
+        "PublishedAt": published_at_str,
+        "EffectiveAt": effective_at,
+        "GazetteNumber": gazette_number,
+    }
+
+
+# ── Parse-half: regex patterns ──────────────────────────────────────────────
 
 MIN_ARTICLES_FOR_CLEAN_PARSE = 1
 TINY_BODY_THRESHOLD = 20  # below this many chars, an article body is suspicious
@@ -125,7 +366,6 @@ UNIQUE_ARTICLE_RE = re.compile(
     r"(?:^|\n)[ \t]*(?:Articol\s+unic|ARTICOL\s+UNIC|Articolul\s+unic)\b[ \t]*",
 )
 
-# ── Regex patterns ───────────────────────────────────────────────────────────
 # Match the article marker ONLY (not the body). Body is the slice between
 # successive matches.
 #
@@ -190,7 +430,7 @@ PARAGRAPH_RE = re.compile(
 )
 
 
-# ── Article extraction ───────────────────────────────────────────────────────
+# ── Parse-half: article extraction ──────────────────────────────────────────
 
 ROMAN_VALUES = {"I": 1, "V": 5, "X": 10, "L": 50, "C": 100, "D": 500, "M": 1000}
 
@@ -312,7 +552,7 @@ def _extract_articles(text: str) -> list[dict]:
     return articles
 
 
-# ── Paragraph extraction ─────────────────────────────────────────────────────
+# ── Parse-half: paragraph extraction ────────────────────────────────────────
 
 
 def _extract_paragraphs(article_path: str, content: str) -> list[dict]:
@@ -354,7 +594,7 @@ def _extract_paragraphs(article_path: str, content: str) -> list[dict]:
     return paragraphs
 
 
-# ── Quality scoring ──────────────────────────────────────────────────────────
+# ── Parse-half: quality scoring ─────────────────────────────────────────────
 
 
 def _structural_zone(text: str) -> tuple[int, int]:
@@ -525,10 +765,11 @@ def compute_quality(text: str, articles: list[dict], *, is_fallback: bool) -> di
     }
 
 
-# ── Driver ───────────────────────────────────────────────────────────────────
+# ── Parse-half: top-level ───────────────────────────────────────────────────
 
 
 def parse_act(act: dict) -> dict:
+    """Split a normalized act's text into articles + paragraphs + quality."""
     text = act.get("Text") or ""
     articles = _extract_articles(text)
     is_fallback = len(articles) < MIN_ARTICLES_FOR_CLEAN_PARSE
@@ -552,28 +793,80 @@ def parse_act(act: dict) -> dict:
     return {"raw": act, "articles": articles, "quality": quality}
 
 
+def transform_act(raw_act: dict) -> dict:
+    """End-to-end transform: raw SOAP dict → normalized + parsed + scored."""
+    return parse_act(normalize_act(raw_act))
+
+
+# ── Driver ──────────────────────────────────────────────────────────────────
+
+
 def main() -> None:
-    logger.info("parse: start (input=stdin)")
+    logger.info(f"transform: start (input={INPUT_PATH.name})")
     REPORT_PATH.parent.mkdir(parents=True, exist_ok=True)
+
     total = 0
+    duplicates_dropped = 0
+    emitent_recovered = 0
+    adopted_extracted = 0
+    published_extracted = 0
+    effective_extracted = 0
+    gazette_extracted = 0
+    number_nulled = 0
     bands: dict[str, int] = {"high": 0, "medium": 0, "low": 0, "intentional-fallback": 0}
     gates: dict[str, int] = {"detection_recall_low": 0, "detection_recall_medium": 0}
     score_sum = 0.0
+    seen_keys: set[tuple[str, str | None]] = set()
 
-    with REPORT_PATH.open("w", encoding="utf-8") as report:
-        for line in sys.stdin:
+    with INPUT_PATH.open(encoding="utf-8") as src, REPORT_PATH.open("w", encoding="utf-8") as report:
+        for line in src:
             if total and total % 10_000 == 0:
-                avg = score_sum / total
+                avg = score_sum / max(1, total - duplicates_dropped)
                 logger.info(
-                    f"parse: progress  acts={total:>7d}  "
+                    f"transform: progress  read={total:>7d}  "
+                    f"unique={total - duplicates_dropped:>7d}  "
+                    f"dupes={duplicates_dropped:>5d}  "
                     f"high={bands['high']:>5d}  med={bands['medium']:>4d}  "
                     f"low={bands['low']:>4d}  fallback={bands['intentional-fallback']:>5d}  "
                     f"mean_score={avg:.3f}"
                 )
-            act = json.loads(line)
-            parsed = parse_act(act)
-            sys.stdout.write(json.dumps(parsed, ensure_ascii=False) + "\n")
+            raw_act = json.loads(line)
             total += 1
+
+            original_emitent = raw_act.get("Emitent") or ""
+            original_numar = (raw_act.get("Numar") or "").strip()
+            normalized = normalize_act(raw_act)
+
+            titlu = normalized.get("Titlu")
+            if titlu is None:
+                continue
+            # (Titlu, Emitent) catches both:
+            #   • SOAP page duplicates (same title + emitter)
+            #   • Distinct filings under boilerplate titles (CUANTUM TOTAL —
+            #     one row per political party, same title, different party in
+            #     Emitent extracted from Text header).
+            key = (titlu, normalized.get("Emitent"))
+            if key in seen_keys:
+                duplicates_dropped += 1
+                continue
+            seen_keys.add(key)
+
+            emitent = normalized.get("Emitent") or ""
+            if "?" in original_emitent and "?" not in emitent:
+                emitent_recovered += 1
+            if normalized.get("AdoptedAt"):
+                adopted_extracted += 1
+            if normalized.get("PublishedAt"):
+                published_extracted += 1
+            if normalized.get("EffectiveAt"):
+                effective_extracted += 1
+            if normalized.get("GazetteNumber") is not None:
+                gazette_extracted += 1
+            if original_numar and normalized.get("Numar") is None:
+                number_nulled += 1
+
+            parsed = parse_act(normalized)
+            sys.stdout.write(json.dumps(parsed, ensure_ascii=False) + "\n")
 
             quality = parsed["quality"]
             bands[quality["band"]] += 1
@@ -584,10 +877,10 @@ def main() -> None:
             report.write(
                 json.dumps(
                     {
-                        "title": act.get("Titlu"),
-                        "type": act.get("TipAct"),
-                        "number": act.get("Numar"),
-                        "text_length": len(act.get("Text") or ""),
+                        "title": normalized.get("Titlu"),
+                        "type": normalized.get("TipAct"),
+                        "number": normalized.get("Numar"),
+                        "text_length": len(normalized.get("Text") or ""),
                         "score": quality["score"],
                         "band": quality["band"],
                         "gate": quality.get("gate"),
@@ -600,20 +893,27 @@ def main() -> None:
                 + "\n"
             )
 
-    avg = score_sum / total if total else 0.0
-    logger.success(f"parse: DONE — {total} acts → stdout")
-    logger.info(f"  mean quality score:    {avg:.3f}")
+    unique = total - duplicates_dropped
+    avg = score_sum / unique if unique else 0.0
+    logger.info(f"  duplicates dropped:           {duplicates_dropped} / {total}")
+    logger.info(f"  emitent recovered from Text:  {emitent_recovered} / {unique}")
+    logger.info(f"  adopted_at extracted:         {adopted_extracted} / {unique}")
+    logger.info(f"  published_at (MO) extracted:  {published_extracted} / {unique}")
+    logger.info(f"  effective_at extracted:       {effective_extracted} / {unique}")
+    logger.info(f"  gazette_number extracted:     {gazette_extracted} / {unique}")
+    logger.info(f"  number placeholders → NULL:   {number_nulled} / {unique}")
+    logger.info(f"  mean quality score:           {avg:.3f}")
     logger.info(
-        f"  high   (≥{HIGH_QUALITY}):           {bands['high']:>6d} ({bands['high'] / total:.1%})"
+        f"  high   (≥{HIGH_QUALITY}):           {bands['high']:>6d} ({bands['high'] / unique:.1%})"
     )
     logger.info(
-        f"  medium ({MEDIUM_QUALITY}–{HIGH_QUALITY}):       {bands['medium']:>6d} ({bands['medium'] / total:.1%})"
+        f"  medium ({MEDIUM_QUALITY}–{HIGH_QUALITY}):       {bands['medium']:>6d} ({bands['medium'] / unique:.1%})"
     )
     logger.info(
-        f"  low    (<{MEDIUM_QUALITY}):           {bands['low']:>6d} ({bands['low'] / total:.1%})"
+        f"  low    (<{MEDIUM_QUALITY}):           {bands['low']:>6d} ({bands['low'] / unique:.1%})"
     )
     logger.info(
-        f"  intentional fallback:  {bands['intentional-fallback']:>6d} ({bands['intentional-fallback'] / total:.1%})"
+        f"  intentional fallback:  {bands['intentional-fallback']:>6d} ({bands['intentional-fallback'] / unique:.1%})"
     )
     if gates["detection_recall_low"] or gates["detection_recall_medium"]:
         logger.warning(
@@ -622,6 +922,7 @@ def main() -> None:
             f"(see report `gate` field)"
         )
     logger.info(f"  per-act report → {REPORT_PATH}")
+    logger.success(f"transform: DONE — {unique} acts → stdout")
 
 
 if __name__ == "__main__":

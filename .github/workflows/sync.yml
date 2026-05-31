@@ -42,17 +42,16 @@ jobs:
       - name: Install deps
         run: uv sync
 
-      - name: Collect
-        run: uv run python -m scripts.collect
+      - name: Extract
+        run: uv run python -m etl.extract
 
-      - name: Normalize → Parse → Export parquet
+      - name: Transform → Load (parquet + FTS)
         run: |
-          uv run python -m scripts.normalize \
-            | uv run python -m scripts.parse \
-            | uv run python -m scripts.export
+          uv run python -m etl.transform \
+            | uv run python -m etl.load
 
-      - name: Build FTS index
-        run: uv run python -m scripts.build_fts
+      - name: Run tests (unit + corpus invariants)
+        run: uv run pytest -q
 
       - name: Prepare release files + manifest
         id: prep

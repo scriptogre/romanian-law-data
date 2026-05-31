@@ -1,0 +1,7 @@
+# Pre-2007 Romanian cedilla orthography → modern comma-below.
+# SOAP `Titlu` uses the legacy forms; `Text` already uses the modern forms.
+# All string fields are translated character-by-character.
+ţ: ț   # U+0163 → U+021B
+ş: ș   # U+015F → U+0219
+Ţ: Ț   # U+0162 → U+021A
+Ş: Ș   # U+015E → U+0218
