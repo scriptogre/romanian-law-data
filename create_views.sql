@@ -42,6 +42,7 @@ SELECT
     published_at,
     effective_at,
     gazette_number,
+    status,
     link
 FROM read_parquet('data/laws/acte.parquet');
 
@@ -81,6 +82,9 @@ COMMENT ON COLUMN acte.effective_at IS
 COMMENT ON COLUMN acte.gazette_number IS
 'Numărul de Monitor Oficial al României, Partea I, în care a fost publicat actul (ex: "M.Of. nr. 431" → 431). Folosit împreună cu published_at pentru citarea formală completă. NULL când tiparul nu a putut fi extras din antet.';
 
+COMMENT ON COLUMN acte.status IS
+'Starea actului în ciclul său de viață: "în vigoare", "abrogat" (abrogat de un alt act, fără repunere ulterioară) sau "suspendat". Derivată din acțiunile suferite de act (endpoint-ul actiuniSuferite de pe legislatie.just.ro). ACEASTA ESTE COLOANA care răspunde la "mai este actul în vigoare?" — un act poate exista în corpus dar să fie abrogat. Pentru a exclude legislația moartă: `WHERE status = ''în vigoare''`. NULL = stare necunoscută (datele de stare nu au fost preluate pentru acest act). Atenție: reflectă consolidarea Ministerului Justiției, care poate avea întârzieri de zile/săptămâni față de Monitorul Oficial.';
+
 COMMENT ON COLUMN acte.link IS
 'URL absolut către pagina actului pe legislatie.just.ro. Format: http://legislatie.just.ro/Public/DetaliiDocument/{id}. Aceeași valoare apare și în articole.link / alineate.link pentru actul-părinte, ca să poți construi link-ul de citare direct dintr-o singură interogare la nivel de articol sau alineat.';
 
@@ -94,6 +98,7 @@ SELECT
     ar.id,
     ar.act_id,
     a.act_citation,
+    a.status,
     a.link,
     ar.article_number,
     ar.article_variant,
@@ -113,6 +118,9 @@ COMMENT ON COLUMN articole.act_id IS
 
 COMMENT ON COLUMN articole.act_citation IS
 'Citarea actului-părinte (preluată din acte.act_citation). Pereche cu `link` formează chip-ul de citare în răspuns. Exemple: "Codul Penal", "Legea 287/2009". Vezi acte.act_citation pentru semantică completă.';
+
+COMMENT ON COLUMN articole.status IS
+'Starea actului-părinte (preluată din acte.status): "în vigoare", "abrogat" sau "suspendat". Filtrează articolele din legislația moartă: `WHERE status = ''în vigoare''`. Vezi acte.status pentru semantică completă. NULL = stare necunoscută.';
 
 COMMENT ON COLUMN articole.link IS
 'URL-ul actului-părinte pe legislatie.just.ro (preluat din acte.link). Folosit împreună cu act_citation pentru a construi link markdown în răspuns.';
@@ -140,6 +148,7 @@ SELECT
     al.article_id,
     ar.act_id,
     a.act_citation,
+    a.status,
     a.link,
     ar.article_number,
     ar.article_variant,
@@ -159,6 +168,9 @@ COMMENT ON COLUMN alineate.id IS
 
 COMMENT ON COLUMN alineate.article_id IS
 'FK către articole.id. Folosește-o când vrei să iei toate alineatele unui articol specific.';
+
+COMMENT ON COLUMN alineate.status IS
+'Starea actului-părinte (preluată din acte.status): "în vigoare", "abrogat" sau "suspendat". Filtrează alineatele din legislația moartă: `WHERE status = ''în vigoare''`. Vezi acte.status pentru semantică completă. NULL = stare necunoscută.';
 
 COMMENT ON COLUMN alineate.act_id IS
 'FK către acte.id (transitiv prin articole). Folosește-o pentru a restrânge la alineatele dintr-un anume act, ex: `WHERE act_id IN (SELECT id FROM cod_penal)`.';

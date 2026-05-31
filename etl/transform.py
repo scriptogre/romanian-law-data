@@ -40,7 +40,7 @@ from loguru import logger
 
 from etl.load import build_fts_index, write_combined_sha256, write_parquets
 from etl.schemas import validate_parquets
-from etl.transforms import dates, dedup, issuers, text
+from etl.transforms import dates, dedup, issuers, status, text
 from etl.transforms.parse import extract_articles, extract_paragraphs
 from etl.transforms.quality import (
     HIGH_QUALITY,
@@ -78,6 +78,7 @@ def cleanup(lf: pl.LazyFrame) -> pl.LazyFrame:
         .pipe(dates.clamp_far_future)
         .pipe(dedup.by_titlu_emitent)
         .pipe(dedup.collapse_code_twins)
+        .pipe(status.add_status)
     )
 
 

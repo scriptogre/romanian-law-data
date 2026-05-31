@@ -16,7 +16,8 @@ joined (act_number ≠ article_number ≠ paragraph_number).
 
     acte.parquet
         id, type, act_number, act_citation, issuer, title, content,
-        adopted_at, published_at, effective_at, gazette_number, link, synced_at
+        adopted_at, published_at, effective_at, gazette_number, status, link,
+        synced_at
 
     articole.parquet
         id, act_id, article_number, article_variant, article_citation, content
@@ -74,6 +75,7 @@ ACTS_SCHEMA = pa.schema(
         ("published_at", pa.date32()),
         ("effective_at", pa.date32()),
         ("gazette_number", pa.int64()),
+        ("status", pa.string()),
         ("link", pa.string()),
         ("synced_at", pa.timestamp("us")),
     ]
@@ -209,6 +211,7 @@ def write_parquets(parsed_iter: Iterable[dict]) -> tuple[int, int, int]:
                     "published_at": _parse_date(raw.get("PublishedAt")),
                     "effective_at": _parse_date(raw.get("EffectiveAt")),
                     "gazette_number": raw.get("GazetteNumber"),
+                    "status": raw.get("Status"),
                     "link": raw.get("LinkHtml"),
                     "synced_at": synced_at,
                 }

@@ -2,8 +2,15 @@
 Stage 1 — extract.py
 
 Fetch every act from `legislatie.just.ro` via its SOAP API. Pages return 10
-acts each. Output: `data/raw_acts.jsonl`, one JSON object per line, fields
-mirror the SOAP response verbatim.
+acts each. Output: `data/raw_acts.jsonl`, one JSON object per line.
+
+Each record carries the SOAP fields verbatim, plus two raw HTML blobs from
+the site's per-act web endpoints (see `docs/source-api.md`):
+
+    actiuni_suferite  what happened TO this act  -> status, valid_until
+    actiuni_induse    what this act does to OTHERS -> relatii edges
+
+We store that HTML untouched. Stage 2 parses it. Re-parsing needs no re-fetch.
 """
 
 import asyncio
@@ -11,6 +18,7 @@ import itertools
 import json
 import os
 import random
+import re
 import threading
 import time
 from dataclasses import dataclass
@@ -25,6 +33,13 @@ from zeep.helpers import serialize_object
 from zeep.transports import Transport
 
 WSDL = "https://legislatie.just.ro/apiws/FreeWebService.svc?wsdl"
+ACTIONS_BASE = "https://legislatie.just.ro/Public"
+# Per-act web endpoints. Both POST {contor: id} -> {"acte": "<html>"}.
+ACTION_ENDPOINTS = ("actiuniSuferite", "actiuniInduse")
+# Fewer retries than SOAP: a 500 here is usually deterministic (the act's
+# action list is too big to render), so retrying 20x just wastes minutes.
+# We back off a few times for transient blips, then store "" and move on.
+ACTION_MAX_RETRIES = 4
 PAGE_SIZE = 10
 DEFAULT_CONCURRENCY = 16  # bump via ETL_CONCURRENCY env var when the runner allows more
 POOL_SIZE = 128  # connection pool — must comfortably exceed DEFAULT_CONCURRENCY
@@ -133,6 +148,50 @@ class LegislatieJustRoClient:
                 time.sleep(delay)
         return []
 
+    def fetch_actiuni(self, act_id: str) -> dict[str, str]:
+        """Fetch both per-act action endpoints. Returns {key: raw_html}.
+
+        Keys are snake_case (`actiuni_suferite`, `actiuni_induse`) to mark
+        them as ours, not SOAP. Always returns both keys; a persistently
+        failing endpoint yields "" so the act still gets written.
+        """
+        return {
+            re.sub(r"(?<!^)(?=[A-Z])", "_", ep).lower(): self._fetch_action(ep, act_id)
+            for ep in ACTION_ENDPOINTS
+        }
+
+    def _fetch_action(self, endpoint: str, act_id: str) -> str:
+        """POST one action endpoint, unwrap {"acte": html}. "" on giving up."""
+        url = f"{ACTIONS_BASE}/{endpoint}"
+
+        for attempt in range(ACTION_MAX_RETRIES):
+            try:
+                response = self.session.post(
+                    url, data={"contor": act_id}, timeout=30
+                )
+                if response.status_code == 200:
+                    return (response.json() or {}).get("acte", "") or ""
+            except Exception:
+                pass  # transient network / non-JSON body: fall through to retry
+
+            if attempt == ACTION_MAX_RETRIES - 1:
+                logger.warning(f"{endpoint} for act {act_id}: gave up, storing empty")
+                return ""
+            base = min(MAX_BACKOFF, INITIAL_BACKOFF * (2**attempt))
+            time.sleep(base * random.uniform(1 - BACKOFF_JITTER, 1 + BACKOFF_JITTER))
+        return ""
+
+
+def _act_id_from_link(link: str | None) -> str | None:
+    """The act id is the trailing number of LinkHtml (…/DetaliiDocument/38070)."""
+    match = re.search(r"/(\d+)\s*$", link or "")
+    return match.group(1) if match else None
+
+
+async def _empty_actiuni() -> dict[str, str]:
+    """Action keys with empty HTML, for acts whose LinkHtml carries no id."""
+    return {re.sub(r"(?<!^)(?=[A-Z])", "_", ep).lower(): "" for ep in ACTION_ENDPOINTS}
+
 
 def _read_cursor() -> int | None:
     if not CURSOR_PATH.exists():
@@ -194,6 +253,21 @@ async def extract_all(
                 logger.info(f"empty batch at pages {list(batch)}, stopping")
                 CURSOR_PATH.unlink(missing_ok=True)
                 break
+
+            # Enrich each act with its action HTML. Run the whole batch's
+            # fetches concurrently so this rides alongside the SOAP paging
+            # instead of serialising 2 POSTs behind every act.
+            act_ids = [_act_id_from_link(act.get("LinkHtml")) for act in acts]
+            actiuni = await asyncio.gather(
+                *(
+                    asyncio.to_thread(client.fetch_actiuni, aid)
+                    if aid
+                    else _empty_actiuni()
+                    for aid in act_ids
+                )
+            )
+            for act, extra in zip(acts, actiuni):
+                act.update(extra)
 
             for act in acts:
                 fp.write(json.dumps(act, ensure_ascii=False, default=str) + "\n")
