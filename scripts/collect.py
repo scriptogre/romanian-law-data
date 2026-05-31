@@ -222,8 +222,13 @@ async def collect_all(
 def main() -> None:
     concurrency = int(os.environ.get("ETL_CONCURRENCY", DEFAULT_CONCURRENCY))
     token_pool_size = int(os.environ.get("ETL_TOKEN_POOL_SIZE", DEFAULT_TOKEN_POOL_SIZE))
-    max_acts = int(os.environ["ETL_MAX_ACTS"]) if "ETL_MAX_ACTS" in os.environ else None
-    start_page = int(os.environ["ETL_START_PAGE"]) if "ETL_START_PAGE" in os.environ else None
+    # `os.environ.get` (not `in os.environ`) treats unset and empty-string the
+    # same way — the workflow sets ETL_MAX_ACTS to "" on scheduled runs.
+    max_acts_raw = os.environ.get("ETL_MAX_ACTS")
+    max_acts = int(max_acts_raw) if max_acts_raw else None
+
+    start_page_raw = os.environ.get("ETL_START_PAGE")
+    start_page = int(start_page_raw) if start_page_raw else None
 
     total = asyncio.run(
         collect_all(
