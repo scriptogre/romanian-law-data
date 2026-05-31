@@ -327,6 +327,35 @@ def test_extract_articles_no_markers_returns_empty():
     assert extract_articles("No markers here.") == []
 
 
+def test_extract_articles_skips_empty_body_between_adjacent_markers():
+    text = "Articolul 1\nArticolul 2 Cuprinsul articolului doi.\nArticolul 3 Trei."
+    out = extract_articles(text)
+    # Art. 1 has no body; should be dropped silently.
+    assert [a["number"] for a in out] == [2, 3]
+    assert all(a["content"] for a in out)
+
+
+def test_extract_articles_rejects_pathological_repetition():
+    """A document with 10 'Art. 8' rows is not articulated — return [] so the
+    caller falls back to a single (unparsed) row."""
+    text = "\n".join(f"Articolul 8 Linie {i}." for i in range(10))
+    assert extract_articles(text) == []
+
+
+def test_extract_articles_keeps_variant_repeats():
+    """Real laws can repeat numbers via bis/^1 variants — keep these."""
+    text = (
+        "Articolul 1 Body one.\n"
+        "Articolul 1 bis Body bis.\n"
+        "Articolul 2 Body two.\n"
+        "Articolul 2 bis Body two bis.\n"
+        "Articolul 3 Body three.\n"
+    )
+    out = extract_articles(text)
+    assert len(out) == 5
+    assert [a["number_variant"] for a in out] == [None, "bis", None, "bis", None]
+
+
 def test_extract_paragraphs_inline_numbered():
     paras = extract_paragraphs("Art. 1", "(1) Prima. (2) A doua.")
     assert [p["number"] for p in paras] == [1, 2]

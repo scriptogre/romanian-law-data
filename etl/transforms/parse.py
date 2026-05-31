@@ -101,6 +101,13 @@ PARAGRAPH_RE = re.compile(
 
 ROMAN_VALUES = {"I": 1, "V": 5, "X": 10, "L": 50, "C": 100, "D": 500, "M": 1000}
 
+# Below this distinct/total (number, variant) ratio, an extraction is treated
+# as pathological — a non-narrative document (TABLOU DE EVIDENȚĂ, list/table
+# documents) whose rows happen to start with "Art. N". Real laws fall well
+# above 0.25 even when articles repeat numbers with `bis` / `^N` variants.
+_PATHOLOGICAL_DISTINCT_RATIO = 0.25
+_PATHOLOGICAL_MIN_ARTICLES = 5
+
 
 def roman_to_int(s: str) -> int:
     """Convert a Roman numeral string to int. Permissive on subtractive form."""
@@ -202,6 +209,12 @@ def extract_articles(text: str) -> list[dict]:
         body_end = matches[i + 1].start() if i + 1 < len(matches) else len(scope)
         content = scope[body_start:body_end].strip()
 
+        if not content:
+            # Empty body — two adjacent markers with no slice between them.
+            # Real articles always have some text; skipping these drops the
+            # 705 empty-articole / 705 empty-alineate rows the audit found.
+            continue
+
         articles.append(
             {
                 "number": number,
@@ -210,6 +223,15 @@ def extract_articles(text: str) -> list[dict]:
                 "content": content,
             }
         )
+
+    # Reject pathological extractions (e.g. TABLOU DE EVIDENȚĂ act 141153
+    # producing 420 "Art. 8" rows from a non-narrative table). The caller
+    # treats `[]` as "no articles" and falls back to a single (unparsed) row.
+    if len(articles) >= _PATHOLOGICAL_MIN_ARTICLES:
+        keys = {(a["number"], a["number_variant"]) for a in articles}
+        if len(keys) / len(articles) < _PATHOLOGICAL_DISTINCT_RATIO:
+            return []
+
     return articles
 
 
