@@ -1,50 +1,28 @@
 """
-Stage 3 — load.py
+Stage 3 — load.py (library)
 
-Read parsed acts from stdin (one JSONL line per act, as emitted by
-transform.py), stream them into three parquet files, then build a persistent
-DuckDB BM25 index over `articole.content`. The pipe-only input avoids
-materializing the ~10 GB parsed.jsonl on disk; run as:
+Functions for the "L" stage of ETL:
 
-    python -m etl.transform | python -m etl.load
+    write_parquets(parsed_iter)  — stream parsed records into 3 parquet files
+    build_fts_index()             — build the BM25 DuckDB FTS index
+    write_combined_sha256()       — emit the manifest hash
 
-Writes happen in batches via pyarrow.parquet.ParquetWriter so memory stays
-O(batch_size) instead of O(full corpus). At 186k acts the previous
-list-then-DataFrame approach OOM'd.
+Called from `etl.transform` after the cleanup + parse stages. No `main()` —
+the merged pipeline runs as `python -m etl.transform`.
 
 Schemas (final v1, no embeddings yet). Column naming follows the rule
 `<level>_<role>` so the role of each column is unambiguous when tables are
 joined (act_number ≠ article_number ≠ paragraph_number).
 
     acte.parquet
-        id              INT64
-        type            STRING       — LEGE, OUG, HG, ORDIN, DECIZIE, ...
-        act_number      STRING NULL  — raw act number from SOAP: "287", "75", or NULL
-        act_citation    STRING       — display label: "Legea 287/2009", "OUG 100/2024", "Codul Civil"
-        issuer          STRING       — emitter (uppercase)
-        title           STRING       — full official title
-        content         STRING       — full raw act text
-        adopted_at      DATE   NULL
-        published_at    DATE   NULL  — gazette publication
-        effective_at    DATE   NULL  — entry into force
-        gazette_number  INT64  NULL
-        link            STRING NULL  — legislatie.just.ro URL
-        synced_at       TIMESTAMP
+        id, type, act_number, act_citation, issuer, title, content,
+        adopted_at, published_at, effective_at, gazette_number, link, synced_at
 
     articole.parquet
-        id                INT64
-        act_id            INT64        — FK → acte.id
-        article_number    INT64  NULL  — ordinal within the act: 188
-        article_variant   STRING NULL  — suffix when present: "bis", "ter", "^1" ...
-        article_citation  STRING       — display label: "Art. 188", "Art. 188 bis"
-        content           STRING       — article text (all paragraphs concatenated)
+        id, act_id, article_number, article_variant, article_citation, content
 
     alineate.parquet
-        id                  INT64
-        article_id          INT64        — FK → articole.id
-        paragraph_number    INT64  NULL  — ordinal within the article (NULL = monolithic article)
-        paragraph_citation  STRING       — display label: "Art. 188 alin. (1)"
-        content             STRING       — paragraph text
+        id, article_id, paragraph_number, paragraph_citation, content
 
 FTS index build peaks around 3-4 GB of working memory on ~1M articles. We cap
 `memory_limit` to 8 GB by default (well under the 16 GB on a public-repo
@@ -53,22 +31,21 @@ if the cap is hit. Override with `FTS_MEMORY_LIMIT` env var.
 """
 
 import hashlib
-import json
 import os
 import shutil
-import sys
+from collections.abc import Iterable
 from datetime import UTC, datetime
 from pathlib import Path
 
 import duckdb
 import pyarrow as pa
 import pyarrow.parquet as pq
-import yaml
 from loguru import logger
+
+from etl.lookups import load as load_lookup
 
 REPO_ROOT = Path(__file__).parent.parent
 DATA_DIR = REPO_ROOT / "data"
-LOOKUPS_DIR = DATA_DIR / "lookups"
 ACTE_PATH = DATA_DIR / "acte.parquet"
 ARTICOLE_PATH = DATA_DIR / "articole.parquet"
 ALINEATE_PATH = DATA_DIR / "alineate.parquet"
@@ -78,18 +55,10 @@ FTS_TEMP_DIR = DATA_DIR / "_fts_temp"
 FTS_MEMORY_LIMIT = os.environ.get("FTS_MEMORY_LIMIT", "8GB")
 
 
-def _load_yaml(name: str) -> dict:
-    with (LOOKUPS_DIR / f"{name}.yaml").open(encoding="utf-8") as f:
-        return yaml.safe_load(f)
-
-
-# Shorthand for the most common act types — produces the form Romanian
-# lawyers actually use in citations (e.g. "Legea 287/2009" not "LEGE 287").
-# Unmapped types fall back to title-case of the raw type.
-TYPE_SHORTHAND: dict[str, str] = _load_yaml("type_shorthand")
-
+# Shorthand for the most common act types. Unmapped types fall back to title-case.
+TYPE_SHORTHAND: dict[str, str] = load_lookup("type_shorthand")
 # Codes are singletons — multiple republicări share the same canonical name.
-SINGLETON_CITATIONS: dict[str, str] = _load_yaml("singleton_citations")
+SINGLETON_CITATIONS: dict[str, str] = load_lookup("singleton_citations")
 
 
 ACTS_SCHEMA = pa.schema(
@@ -134,30 +103,28 @@ BATCH_ARTICLES = 10_000
 BATCH_PARAGRAPHS = 50_000
 
 
-def _parse_date(value: str | None):
-    if not value:
+def _parse_date(value):
+    """Accept either a date already (Polars row) or an ISO string (legacy)."""
+    if value is None:
         return None
+    if hasattr(value, "year"):  # already datetime.date / date32
+        return value
     try:
-        return datetime.strptime(value[:10], "%Y-%m-%d").date()
+        return datetime.strptime(str(value)[:10], "%Y-%m-%d").date()
     except ValueError:
         return None
 
 
 def _strip_bom(value: str | None) -> str | None:
-    """Defensive BOM strip on text fields read from the parse stream."""
+    """Defensive BOM strip on text fields."""
     if value is None:
         return None
     cleaned = value.lstrip("﻿").strip()
     return cleaned or None
 
 
-def build_act_citation(
-    type_: str | None,
-    act_number: str | None,
-    adopted_at,
-    issuer: str | None,
-) -> str:
-    """Build the act-level citation a Romanian lawyer would type. Always returns a string.
+def build_act_citation(type_, act_number, adopted_at, issuer) -> str:
+    """Build the act-level citation a Romanian lawyer would type.
 
     Year comes from `adopted_at` only — published_at (M.Of. date) can shift across
     years for acts adopted late December, so using it as a fallback would silently
@@ -192,28 +159,33 @@ def _flush(writer: pq.ParquetWriter, rows: list[dict], schema: pa.Schema) -> Non
     rows.clear()
 
 
-def write_parquets() -> tuple[int, int, int]:
-    """Stream parsed acts from stdin → three parquet files. Returns row counts."""
+def write_parquets(parsed_iter: Iterable[dict]) -> tuple[int, int, int]:
+    """Stream parsed records into 3 parquet files. Returns (n_acts, n_articles, n_paragraphs).
+
+    `parsed_iter` is any iterable of dicts shaped:
+        {
+            "raw": { Titlu, Text, TipAct, Numar, Emitent, ..., AdoptedAt, ... },
+            "articles": [ {number, number_variant, full_path, content, paragraphs: [...]}, ... ]
+        }
+
+    Memory is O(batch_size), not O(corpus). At 186k acts the previous
+    list-then-DataFrame approach OOM'd.
+    """
     DATA_DIR.mkdir(parents=True, exist_ok=True)
     synced_at = datetime.now(UTC).replace(tzinfo=None)
 
-    next_act_id = 1
-    next_article_id = 1
-    next_paragraph_id = 1
-
+    next_act_id = next_article_id = next_paragraph_id = 1
+    n_acts = n_articles = n_paragraphs = 0
     act_buf: list[dict] = []
     article_buf: list[dict] = []
     paragraph_buf: list[dict] = []
-
-    n_acts = n_articles = n_paragraphs = 0
 
     with (
         pq.ParquetWriter(ACTE_PATH, ACTS_SCHEMA, compression="zstd") as acts_writer,
         pq.ParquetWriter(ARTICOLE_PATH, ARTICLES_SCHEMA, compression="zstd") as articles_writer,
         pq.ParquetWriter(ALINEATE_PATH, PARAGRAPHS_SCHEMA, compression="zstd") as paragraphs_writer,
     ):
-        for line in sys.stdin:
-            parsed = json.loads(line)
+        for parsed in parsed_iter:
             raw = parsed["raw"]
 
             act_id = next_act_id
@@ -243,8 +215,8 @@ def write_parquets() -> tuple[int, int, int]:
             )
             n_acts += 1
 
-            # transform.py emits dicts with internal keys (`number`, `number_variant`,
-            # `full_path`); we map them here to the level-prefixed schema names.
+            # transform emits internal article keys (`number`, `number_variant`,
+            # `full_path`); map them to the level-prefixed schema names.
             for article in parsed["articles"]:
                 article_id = next_article_id
                 next_article_id += 1
@@ -310,10 +282,11 @@ def build_fts_index() -> None:
         con.execute("INSTALL fts")
         con.execute("LOAD fts")
         con.execute(f"SET memory_limit='{FTS_MEMORY_LIMIT}'")
-        con.execute("SET threads=2")
+        n_threads = int(os.environ.get("FTS_THREADS", os.cpu_count() or 4))
+        con.execute(f"SET threads={n_threads}")
         con.execute(f"SET temp_directory='{FTS_TEMP_DIR}'")
         con.execute("SET preserve_insertion_order=false")
-        logger.info(f"memory_limit={FTS_MEMORY_LIMIT} (override via FTS_MEMORY_LIMIT)")
+        logger.info(f"memory_limit={FTS_MEMORY_LIMIT}  threads={n_threads}")
 
         logger.info(f"materialising articole_fts from {ARTICOLE_PATH} ...")
         con.execute(
@@ -325,10 +298,9 @@ def build_fts_index() -> None:
         n = con.execute("SELECT COUNT(*) FROM articole_fts").fetchone()[0]
         logger.info(f"rows: {n:,}")
 
-        # The `ignore` regex defines what is NOT a token separator (i.e. what
-        # to strip). We keep Romanian letters + digits; everything else splits.
-        # `strip_accents=0` preserves ă/â/î/ș/ț so terms like "bună-credință"
-        # tokenize correctly.
+        # `ignore` defines what is NOT a token separator — we keep Romanian
+        # letters + digits; everything else splits. `strip_accents=0` preserves
+        # ă/â/î/ș/ț so terms like "bună-credință" tokenize correctly.
         logger.info("building FTS index (Romanian Snowball stemmer)...")
         con.execute(
             r"""
@@ -352,7 +324,8 @@ def build_fts_index() -> None:
     logger.success(f"build_fts: DONE — {FTS_DB_PATH} ({size_mb:.1f} MB)")
 
 
-def _write_combined_sha256() -> str:
+def write_combined_sha256() -> str:
+    """Emit a one-line sha256 manifest covering the 3 parquets."""
     hasher = hashlib.sha256()
     for path in (ACTE_PATH, ARTICOLE_PATH, ALINEATE_PATH):
         with path.open("rb") as f:
@@ -361,24 +334,3 @@ def _write_combined_sha256() -> str:
     digest = hasher.hexdigest()
     SHA_PATH.write_text(digest + "\n")
     return digest
-
-
-def main() -> None:
-    logger.info("load: start (input=stdin)")
-    n_acts, n_articles, n_paragraphs = write_parquets()
-    digest = _write_combined_sha256()
-
-    logger.info(f"  acte:     {n_acts:>8d} rows  → {ACTE_PATH}")
-    logger.info(f"  articole: {n_articles:>8d} rows  → {ARTICOLE_PATH}")
-    logger.info(f"  alineate: {n_paragraphs:>8d} rows  → {ALINEATE_PATH}")
-    logger.info(f"  sha256:   {digest}")
-
-    build_fts_index()
-
-    logger.success(
-        f"load: DONE — {n_acts} acte / {n_articles} articole / {n_paragraphs} alineate + FTS"
-    )
-
-
-if __name__ == "__main__":
-    main()

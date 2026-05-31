@@ -22,19 +22,18 @@ test:
 extract:
     uv run python -m etl.extract
 
-# Smoke run: head -N data/raw_acts.jsonl through transform | load.
-# Set ETL_MAX_ACTS so transform.py knows the cap (not strictly needed for head pipe,
-# but useful for log clarity).
+# Smoke run: head -N from data/raw_acts.jsonl. Backs up the full cache,
+# swaps in the head, runs the merged pipeline, restores the cache.
 smoke n="1000":
-    head -{{n}} data/raw_acts.jsonl > /tmp/raw_acts_smoke.jsonl
     cp data/raw_acts.jsonl /tmp/raw_acts_full_backup.jsonl
+    head -{{n}} data/raw_acts.jsonl > /tmp/raw_acts_smoke.jsonl
     mv /tmp/raw_acts_smoke.jsonl data/raw_acts.jsonl
-    uv run python -m etl.transform | uv run python -m etl.load
+    uv run python -m etl.transform
     mv /tmp/raw_acts_full_backup.jsonl data/raw_acts.jsonl
 
-# Full local pipeline run, end to end. Uses the cached raw_acts.jsonl.
+# Full local pipeline run. Cleanup + parse + parquet + validate + FTS, one process.
 local:
-    uv run python -m etl.transform | uv run python -m etl.load
+    uv run python -m etl.transform
 
 # Audit the current parquet bundle via DuckDB.
 audit:

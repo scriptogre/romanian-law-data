@@ -12,6 +12,7 @@ dependencies = [
     "httpx>=0.27",
     "duckdb>=1.5.3",
     "pyyaml>=6.0",
+    "pandera[polars]>=0.31.1",
 ]
 
 [dependency-groups]
