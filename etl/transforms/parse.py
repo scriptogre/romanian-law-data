@@ -46,10 +46,13 @@ ZONE_START_RE = re.compile(
     r")\b",
 )
 
-# DECRETs and other short acts often use "Articol unic" / "ARTICOL UNIC".
+# DECRETs and other short acts often use a single-article marker. The corpus
+# uses every case combination — `Articolul unic`, `Articolul UNIC`, `Articol
+# unic`, `ARTICOL UNIC`. Case-insensitive matching captures all of them.
 # Treated as a single article with number=NULL.
 UNIQUE_ARTICLE_RE = re.compile(
-    r"(?:^|\n)[ \t]*(?:Articol\s+unic|ARTICOL\s+UNIC|Articolul\s+unic)\b[ \t]*",
+    r"(?:^|\n)[ \t]*Articol(?:ul)?\s+unic\b[ \t]*",
+    re.IGNORECASE,
 )
 
 # Article marker (NOT body). Body is the slice between successive matches.

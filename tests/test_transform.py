@@ -162,9 +162,11 @@ def test_extract_emitent_str_joint_issuers_separated_by_slash():
 
 
 def test_apply_aliases_rewrites_known_variants_only():
-    lf = pl.LazyFrame({"Emitent": ["MINISTERUL SANATATII", "PARLAMENTUL", None]})
+    # Picks a real entry from the corpus-derived YAML — every diacritic-stripped
+    # variant gets collapsed onto its canonical form.
+    lf = pl.LazyFrame({"Emitent": ["ACT INTERNATIONAL", "PARLAMENTUL", None]})
     out = issuers.apply_aliases(lf).collect()
-    assert out["Emitent"].to_list() == ["MINISTERUL SĂNĂTĂȚII", "PARLAMENTUL", None]
+    assert out["Emitent"].to_list() == ["ACT INTERNAȚIONAL", "PARLAMENTUL", None]
 
 
 # ── dates ───────────────────────────────────────────────────────────────────
@@ -340,6 +342,23 @@ def test_extract_articles_rejects_pathological_repetition():
     caller falls back to a single (unparsed) row."""
     text = "\n".join(f"Articolul 8 Linie {i}." for i in range(10))
     assert extract_articles(text) == []
+
+
+def test_unique_article_matches_all_case_variants():
+    """`Articolul UNIC` (uppercase UNIC) is by far the most common single-article
+    marker in the corpus (35k+ rows) — must be matched alongside the other cases."""
+    for marker in (
+        "Articolul unic",
+        "Articolul UNIC",   # the one we were missing
+        "ARTICOLUL UNIC",
+        "Articol unic",
+        "ARTICOL UNIC",
+    ):
+        text = f"Preamble.\n{marker} Body content of the unique article."
+        out = extract_articles(text)
+        assert len(out) == 1, f"failed on {marker!r}"
+        assert out[0]["full_path"] == "Articol unic"
+        assert "Body content" in out[0]["content"]
 
 
 def test_extract_articles_keeps_variant_repeats():
