@@ -15,6 +15,10 @@ import unicodedata
 
 import polars as pl
 
+from etl.lookups import load
+
+ISSUER_ALIASES: dict[str, str] = load("issuer_aliases")
+
 # Match "EMITENT  <NAME>" terminated by "Nr." (joint orders) or "Publicat".
 EMITENT_RE = re.compile(
     r"EMITENT\s+(?P<name>.+?)\s+(?:Nr\.|Publicat|Republicat)",
@@ -67,4 +71,18 @@ def recover_emitent(lf: pl.LazyFrame) -> pl.LazyFrame:
             return_dtype=pl.Utf8,
         )
         .alias("Emitent")
+    )
+
+
+def apply_aliases(lf: pl.LazyFrame) -> pl.LazyFrame:
+    """Collapse known Emitent variants to a single canonical form.
+
+    Exact-match replacement: only values present in `issuer_aliases.yaml` are
+    rewritten; everything else passes through unchanged. Add entries to the
+    YAML as the issuer-distribution audit surfaces new variants.
+    """
+    if not ISSUER_ALIASES:
+        return lf
+    return lf.with_columns(
+        pl.col("Emitent").replace(ISSUER_ALIASES).alias("Emitent")
     )

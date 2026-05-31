@@ -71,10 +71,13 @@ def cleanup(lf: pl.LazyFrame) -> pl.LazyFrame:
         .pipe(text.normalize_numar)
         .pipe(text.blank_titlu_to_null)
         .pipe(issuers.recover_emitent)
+        .pipe(issuers.apply_aliases)
         .pipe(dates.extract_adopted)
         .pipe(dates.extract_gazette)
         .pipe(dates.extract_effective)
+        .pipe(dates.clamp_far_future)
         .pipe(dedup.by_titlu_emitent)
+        .pipe(dedup.collapse_code_twins)
     )
 
 

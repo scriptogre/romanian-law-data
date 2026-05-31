@@ -1,0 +1,20 @@
+# Exact-match canonicalisation for Emitent values produced by `recover_emitent`.
+# Key:    a variant we want to collapse  (already canonicalised: uppercase, NFC)
+# Value:  the single canonical form
+#
+# Add entries here as the issuer-distribution audit surfaces variants. The
+# audit lives in `notebooks/` (or: `just audit` then filter the distinct
+# Emitent list and eyeball obvious duplicates).
+#
+# Common variant families to look for:
+#   - cedilla vs. comma-below     (already normalised upstream, but be defensive)
+#   - missing diacritics          ("MINISTERUL APARARII" → "MINISTERUL APĂRĂRII")
+#   - reorderings                 ("MINISTERUL X / MINISTERUL Y" vs "Y / X")
+#   - obsolete vs. current names  (defunct ministries that were renamed)
+#
+# Seed (extend as needed):
+MINISTERUL APARARII NATIONALE: MINISTERUL APĂRĂRII NAȚIONALE
+MINISTERUL APARARII: MINISTERUL APĂRĂRII NAȚIONALE
+MINISTERUL SANATATII: MINISTERUL SĂNĂTĂȚII
+MINISTERUL EDUCATIEI NATIONALE: MINISTERUL EDUCAȚIEI NAȚIONALE
+MINISTERUL EDUCATIEI: MINISTERUL EDUCAȚIEI

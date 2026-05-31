@@ -156,6 +156,12 @@ def test_extract_emitent_str_joint_issuers_separated_by_slash():
     assert "MINISTERUL EDUCAȚIEI" in out
 
 
+def test_apply_aliases_rewrites_known_variants_only():
+    lf = pl.LazyFrame({"Emitent": ["MINISTERUL SANATATII", "PARLAMENTUL", None]})
+    out = issuers.apply_aliases(lf).collect()
+    assert out["Emitent"].to_list() == ["MINISTERUL SĂNĂTĂȚII", "PARLAMENTUL", None]
+
+
 # ── dates ───────────────────────────────────────────────────────────────────
 
 
@@ -183,14 +189,27 @@ def test_extract_gazette_str_no_match():
 
 
 def test_extract_effective_at_str_preserves_far_future():
-    """Year-6201 SOAP record exists in production. Phase 5 fix will clamp; for
-    now, just lock pass-through."""
+    """The pure helper passes far-future through; `clamp_far_future` nulls it."""
     assert dates.extract_effective_at_str("6201-06-01") == "6201-06-01"
 
 
 def test_extract_effective_at_str_invalid():
     assert dates.extract_effective_at_str("not a date") is None
     assert dates.extract_effective_at_str(None) is None
+
+
+def test_clamp_far_future_nulls_year_past_threshold():
+    lf = pl.LazyFrame(
+        {
+            "AdoptedAt": ["2020-01-01", "6201-06-01", None],
+            "PublishedAt": ["6201-06-01", "2020-01-01", "2099-12-31"],
+            "EffectiveAt": ["2100-01-01", "2099-01-01", None],
+        }
+    )
+    out = dates.clamp_far_future(lf).collect()
+    assert out["AdoptedAt"].to_list() == ["2020-01-01", None, None]
+    assert out["PublishedAt"].to_list() == [None, "2020-01-01", "2099-12-31"]
+    assert out["EffectiveAt"].to_list() == [None, "2099-01-01", None]
 
 
 # ── dedup ───────────────────────────────────────────────────────────────────
@@ -205,6 +224,26 @@ def test_dedup_drops_duplicate_titlu_emitent_pair():
     )
     out = dedup.by_titlu_emitent(lf).collect()
     assert out["Titlu"].to_list() == ["A", "B", ""]
+
+
+def test_collapse_code_twins_drops_codul_x_with_lege_ref():
+    lf = pl.LazyFrame(
+        {
+            "TipAct": ["LEGE", "CODUL CIVIL", "CODUL CIVIL", "DECIZIE"],
+            "Titlu": [
+                "LEGE nr. 287 din 17 iulie 2009 privind Codul civil",
+                "CODUL CIVIL din 17 iulie 2009 (*republicat*) ( LEGE nr. 287/2009 )",
+                "CODUL CIVIL din 26 noiembrie 1864",  # old code, no LEGE ref → keep
+                "DECIZIA nr. 62 ( LEGE nr. 287/2009 )",  # not COD* → keep
+            ],
+        }
+    )
+    out = dedup.collapse_code_twins(lf).collect()
+    titles = out["Titlu"].to_list()
+    assert "LEGE nr. 287 din 17 iulie 2009 privind Codul civil" in titles
+    assert "CODUL CIVIL din 26 noiembrie 1864" in titles
+    assert "DECIZIA nr. 62 ( LEGE nr. 287/2009 )" in titles
+    assert all("(*republicat*)" not in t for t in titles)
 
 
 # ── parse ───────────────────────────────────────────────────────────────────

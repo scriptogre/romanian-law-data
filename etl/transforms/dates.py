@@ -23,6 +23,14 @@ ROMANIAN_MONTHS: dict[str, int] = load("romanian_months")
 _MONTH_NAMES = list(ROMANIAN_MONTHS.keys())
 _MONTH_NUMS = [f"{v:02d}" for v in ROMANIAN_MONTHS.values()]
 
+# Year past which a date is treated as a data-entry error (e.g. SOAP returns
+# `6201-01-01` for some ORDIN rows). Romanian legal acts don't legislate the
+# 22nd century.
+FAR_FUTURE_YEAR = 2099
+
+# Date columns produced by extract_adopted / extract_gazette / extract_effective.
+_DATE_COLS = ["AdoptedAt", "PublishedAt", "EffectiveAt"]
+
 # Regex patterns — no lookaround, Rust-regex compatible.
 _DATE_PATTERN = r"(?i)din\s+(\d{1,2})\s+(" + "|".join(_MONTH_NAMES) + r")\s+(\d{4})"
 
@@ -160,4 +168,26 @@ def extract_effective(lf: pl.LazyFrame) -> pl.LazyFrame:
         .str.strptime(pl.Date, "%Y-%m-%d", strict=False)
         .cast(pl.Utf8)
         .alias("EffectiveAt")
+    )
+
+
+def clamp_far_future(lf: pl.LazyFrame) -> pl.LazyFrame:
+    """Null any date whose year is past FAR_FUTURE_YEAR. Applied to all 3 date cols."""
+    cutoff = f"{FAR_FUTURE_YEAR + 1}-01-01"
+    return lf.with_columns(
+        [
+            pl.when(pl.col(c) >= cutoff).then(None).otherwise(pl.col(c)).alias(c)
+            for c in _DATE_COLS
+        ]
+    )
+
+
+def null_sentinel_pubdates(lf: pl.LazyFrame) -> pl.LazyFrame:
+    """Null PublishedAt if its year matches a known sentinel placeholder."""
+    year_prefixes = [f"{y}-" for y in SENTINEL_PUB_YEARS]
+    return lf.with_columns(
+        pl.when(pl.col("PublishedAt").str.slice(0, 5).is_in(year_prefixes))
+        .then(None)
+        .otherwise(pl.col("PublishedAt"))
+        .alias("PublishedAt")
     )
