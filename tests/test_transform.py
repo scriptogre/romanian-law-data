@@ -49,6 +49,77 @@ def test_fix_cedilla_lazyframe_applies_across_columns():
     assert out["Text"][0] == "text țară"
 
 
+def test_decode_html_entities_str_named_and_numeric():
+    s = '&quot;Curtea&quot; &amp; Parlament&#160;1&apos;a'
+    assert text.decode_html_entities_str(s) == '"Curtea" & Parlament 1\'a'
+
+
+def test_decode_html_entities_str_handles_none_and_empty():
+    assert text.decode_html_entities_str(None) is None
+    assert text.decode_html_entities_str("") == ""
+
+
+def test_decode_html_entities_lazyframe_does_not_double_decode():
+    lf = pl.LazyFrame(
+        {
+            "Titlu": ["&amp;lt;"],
+            "Text": ["A &amp; B &quot;c&quot; &#160;d"],
+            "Emitent": [""],
+            "Publicatie": [""],
+        }
+    )
+    out = text.decode_html_entities(lf).collect()
+    # single-pass: &amp;lt; -> &lt; (not <)
+    assert out["Titlu"][0] == "&lt;"
+    assert out["Text"][0] == 'A & B "c"  d'
+
+
+def test_clean_text_collapses_nbsp_with_regular_spaces():
+    """`&#160;` decodes to NBSP; `clean_text` must collapse it with adjacent spaces."""
+    lf = pl.LazyFrame({"Text": ["A    B"]})
+    out = text.clean_text(lf).collect()
+    assert out["Text"][0] == "A B"
+
+
+def test_fix_replacement_chars_strips_ufffd():
+    assert text.fix_replacement_chars_str("CURTEA �N A�") == "CURTEA N A"
+    lf = pl.LazyFrame(
+        {
+            "Titlu": ["LEGE �"],
+            "Text": ["a�b"],
+            "Emitent": [""],
+            "Publicatie": [""],
+        }
+    )
+    out = text.fix_replacement_chars(lf).collect()
+    assert out["Titlu"][0] == "LEGE "
+    assert out["Text"][0] == "ab"
+
+
+def test_normalize_nfc_composes_decomposed_breve():
+    # 'a' + U+0306 combining breve  →  'ă' (single codepoint)
+    decomposed = "ă"
+    assert len(decomposed) == 2
+    out = text.normalize_nfc_str(decomposed)
+    assert out == "ă"
+    assert len(out) == 1
+
+
+def test_normalize_nfc_lazyframe_across_columns():
+    lf = pl.LazyFrame(
+        {
+            "Titlu": ["ă"],
+            "Text": ["ţ"],  # t + combining cedilla → ţ (legacy)
+            "Emitent": ["ş"],
+            "Publicatie": [""],
+        }
+    )
+    out = text.normalize_nfc(lf).collect()
+    assert out["Titlu"][0] == "ă"
+    assert out["Text"][0] == "ţ"
+    assert out["Emitent"][0] == "ş"
+
+
 def test_clean_titlu_strips_emitent_suffix():
     lf = pl.LazyFrame({"Titlu": ["LEGE nr. 1   EMITENT PARLAMENT\n PUBLICAT ÎN MO"]})
     out = text.clean_titlu(lf).collect()

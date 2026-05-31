@@ -6,6 +6,9 @@ Each function takes a LazyFrame and returns a LazyFrame so it composes via
 for direct unit-testing of the rule (without spinning up Polars).
 """
 
+import re
+import unicodedata
+
 import polars as pl
 
 from etl.lookups import load
@@ -15,6 +18,18 @@ _CEDILLA_MAP = load("cedilla")
 CEDILLA_TRANSLATE = str.maketrans(_CEDILLA_MAP)
 _LEGACY_CHARS = list(_CEDILLA_MAP.keys())
 _MODERN_CHARS = list(_CEDILLA_MAP.values())
+
+_HTML_ENTITY_MAP = load("html_entities")
+_ENTITY_KEYS = list(_HTML_ENTITY_MAP.keys())
+_ENTITY_VALUES = list(_HTML_ENTITY_MAP.values())
+# Single-pass alternation for the Python helper. Matches the Polars
+# `replace_many` semantics (no iterative re-decoding of `&amp;lt;`).
+_ENTITY_RE = re.compile("|".join(re.escape(k) for k in _ENTITY_KEYS))
+
+REPLACEMENT_CHAR = "�"
+
+# Columns that get the full text-cleaning pass.
+_TEXT_COLS = ["Titlu", "Text", "Emitent", "Publicatie"]
 
 
 # ── Pure helpers (testable in isolation) ────────────────────────────────────
@@ -30,6 +45,25 @@ def strip_bom_str(s: str | None) -> str | None:
     return s.lstrip("﻿") if s else s
 
 
+def decode_html_entities_str(s: str | None) -> str | None:
+    """Decode the entities listed in `data/lookups/html_entities.yaml`.
+    Single-pass — `&amp;lt;` becomes `&lt;`, not `<`. Matches `decode_html_entities`.
+    """
+    if not s:
+        return s
+    return _ENTITY_RE.sub(lambda m: _HTML_ENTITY_MAP[m.group(0)], s)
+
+
+def fix_replacement_chars_str(s: str | None) -> str | None:
+    """Strip U+FFFD replacement chars left by upstream decoding errors."""
+    return s.replace(REPLACEMENT_CHAR, "") if s else s
+
+
+def normalize_nfc_str(s: str | None) -> str | None:
+    """Compose decomposed sequences (e.g. a + combining-breve → ă)."""
+    return unicodedata.normalize("NFC", s) if s else s
+
+
 def blank_to_none(s: str | None) -> str | None:
     """Collapse empty / whitespace-only strings to None."""
     if s is None:
@@ -41,11 +75,33 @@ def blank_to_none(s: str | None) -> str | None:
 # ── LazyFrame transforms (composable via .pipe()) ───────────────────────────
 
 
+def normalize_nfc(lf: pl.LazyFrame) -> pl.LazyFrame:
+    """Compose decomposed unicode sequences. Runs before any rule that
+    matches on specific codepoints (cedilla, regex character classes).
+    """
+    return lf.with_columns([pl.col(c).str.normalize("NFC") for c in _TEXT_COLS])
+
+
+def decode_html_entities(lf: pl.LazyFrame) -> pl.LazyFrame:
+    """Replace `&quot;`, `&amp;`, `&#160;` etc. with their literal characters.
+    Single-pass Aho-Corasick — does not iteratively re-decode `&amp;lt;`.
+    """
+    return lf.with_columns(
+        [pl.col(c).str.replace_many(_ENTITY_KEYS, _ENTITY_VALUES) for c in _TEXT_COLS]
+    )
+
+
+def fix_replacement_chars(lf: pl.LazyFrame) -> pl.LazyFrame:
+    """Drop U+FFFD replacement characters (encoding noise, no recoverable info)."""
+    return lf.with_columns(
+        [pl.col(c).str.replace_all(REPLACEMENT_CHAR, "", literal=True) for c in _TEXT_COLS]
+    )
+
+
 def fix_cedilla(lf: pl.LazyFrame) -> pl.LazyFrame:
     """Apply cedilla → comma-below translation to every text column."""
-    cols = ["Titlu", "Text", "Emitent", "Publicatie"]
     return lf.with_columns(
-        [pl.col(c).str.replace_many(_LEGACY_CHARS, _MODERN_CHARS) for c in cols]
+        [pl.col(c).str.replace_many(_LEGACY_CHARS, _MODERN_CHARS) for c in _TEXT_COLS]
     )
 
 
@@ -76,9 +132,9 @@ def clean_text(lf: pl.LazyFrame) -> pl.LazyFrame:
     """Collapse whitespace inside Text but preserve newlines (parser needs them)."""
     return lf.with_columns(
         pl.col("Text")
-        .str.replace_all(r"[ \t]*\+[ \t]*", " ")
-        .str.replace_all(r"[ \t]+", " ")
-        .str.replace_all(r"\n[ \t]+", "\n")
+        .str.replace_all(r"[ \t ]*\+[ \t ]*", " ")
+        .str.replace_all(r"[ \t ]+", " ")
+        .str.replace_all(r"\n[ \t ]+", "\n")
         .str.replace_all(r"\n{3,}", "\n\n")
         .str.strip_chars()
         .alias("Text")

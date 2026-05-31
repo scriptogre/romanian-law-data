@@ -61,6 +61,9 @@ def cleanup(lf: pl.LazyFrame) -> pl.LazyFrame:
     """Apply every cleanup transform in order. The composition is the contract."""
     return (
         lf
+        .pipe(text.normalize_nfc)
+        .pipe(text.decode_html_entities)
+        .pipe(text.fix_replacement_chars)
         .pipe(text.fix_cedilla)
         .pipe(text.strip_bom)
         .pipe(text.clean_titlu)

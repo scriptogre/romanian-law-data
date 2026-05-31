@@ -1,0 +1,10 @@
+# HTML entities found in legislatie.just.ro Text/Titlu fields.
+# Decoded in a single Aho-Corasick pass via Polars `str.replace_many`.
+# Add new ones here as they appear in the corpus.
+"&quot;": '"'
+"&amp;": "&"
+"&lt;": "<"
+"&gt;": ">"
+"&#160;": " "   # non-breaking space (numeric)
+"&nbsp;": " "   # non-breaking space (named)
+"&apos;": "'"
