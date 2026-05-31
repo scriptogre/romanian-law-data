@@ -20,6 +20,11 @@ jobs:
     env:
       ETL_MAX_ACTS: ${{ inputs.max_acts }}
       ETL_CONCURRENCY: "20"
+      # Skip the per-act actiuni HTML enrichment for full-corpus runs — it
+      # makes per-act HTTP work ~20x and doesn't fit the 6h CI budget. The
+      # status column will be NULL for this build. TODO: ship a separate
+      # enrichment workflow that runs after this and back-fills status.
+      ETL_FETCH_ACTIUNI: "false"
     steps:
       - name: Free disk space
         uses: jlumbroso/free-disk-space@main

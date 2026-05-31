@@ -36,6 +36,13 @@ WSDL = "https://legislatie.just.ro/apiws/FreeWebService.svc?wsdl"
 ACTIONS_BASE = "https://legislatie.just.ro/Public"
 # Per-act web endpoints. Both POST {contor: id} -> {"acte": "<html>"}.
 ACTION_ENDPOINTS = ("actiuniSuferite", "actiuniInduse")
+# Toggle the action enrichment off via env when full-corpus throughput matters
+# more than the status column. With both endpoints enabled the per-act HTTP
+# work is ~20x the SOAP-only baseline (legislatie.just.ro rate-limits per
+# second, not per act) — full sync at ETL_CONCURRENCY=20 runs ~4 acts/s
+# which doesn't fit the 6h CI budget. Set ETL_FETCH_ACTIUNI=false to ship
+# a fast SOAP-only release; status column will be NULL for that build.
+FETCH_ACTIUNI = os.environ.get("ETL_FETCH_ACTIUNI", "true").lower() not in ("false", "0", "")
 # Fewer retries than SOAP: a 500 here is usually deterministic (the act's
 # action list is too big to render), so retrying 20x just wastes minutes.
 # We back off a few times for transient blips, then store "" and move on.
@@ -261,15 +268,17 @@ async def extract_all(
                 CURSOR_PATH.unlink(missing_ok=True)
                 break
 
-            # Enrich each act with its action HTML. Per-batch fan-out: both
-            # endpoints of every act run concurrently in worker threads so the
-            # bottleneck is the slowest single POST, not the sequential pair.
-            act_ids = [_act_id_from_link(act.get("LinkHtml")) for act in acts]
-            actiuni = await asyncio.gather(
-                *(_fetch_actiuni_parallel(client, aid) for aid in act_ids)
-            )
-            for act, extra in zip(acts, actiuni):
-                act.update(extra)
+            # Enrich each act with its action HTML (optional). Per-batch fan-
+            # out: both endpoints of every act run concurrently in worker
+            # threads so the bottleneck is the slowest single POST, not the
+            # sequential pair. Skipped when ETL_FETCH_ACTIUNI=false.
+            if FETCH_ACTIUNI:
+                act_ids = [_act_id_from_link(act.get("LinkHtml")) for act in acts]
+                actiuni = await asyncio.gather(
+                    *(_fetch_actiuni_parallel(client, aid) for aid in act_ids)
+                )
+                for act, extra in zip(acts, actiuni):
+                    act.update(extra)
 
             for act in acts:
                 fp.write(json.dumps(act, ensure_ascii=False, default=str) + "\n")
