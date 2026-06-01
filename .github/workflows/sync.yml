@@ -13,16 +13,20 @@ on:
 permissions:
   contents: write
 
+# Two jobs so a Transform/validate/test/publish failure does NOT throw away
+# Extract's two-hour SOAP sweep. If transform_publish fails, `gh run rerun
+# --failed` re-runs only that job — the cached raw_acts.jsonl artifact is
+# re-downloaded and the iteration costs ~5 min instead of ~2 h.
 jobs:
-  sync:
+  extract:
     runs-on: ubuntu-latest
-    timeout-minutes: 360
+    timeout-minutes: 240
     env:
       ETL_MAX_ACTS: ${{ inputs.max_acts }}
       ETL_CONCURRENCY: "20"
-      # Skip the per-act actiuni HTML enrichment for full-corpus runs — it
-      # makes per-act HTTP work ~20x and doesn't fit the 6h CI budget. The
-      # status column will be NULL for this build. TODO: ship a separate
+      # Skip per-act actiuni HTML enrichment for full-corpus runs — it makes
+      # per-act HTTP work ~20x and doesn't fit the CI budget. The `status`
+      # column will be NULL for builds produced here. TODO: ship a separate
       # enrichment workflow that runs after this and back-fills status.
       ETL_FETCH_ACTIUNI: "false"
     steps:
@@ -49,6 +53,46 @@ jobs:
 
       - name: Extract
         run: uv run python -m etl.extract
+
+      - name: Upload raw_acts.jsonl
+        uses: actions/upload-artifact@v7
+        with:
+          name: raw-acts
+          path: data/raw_acts.jsonl
+          retention-days: 7
+          compression-level: 9
+
+  transform_publish:
+    needs: extract
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    steps:
+      - name: Free disk space
+        uses: jlumbroso/free-disk-space@main
+        with:
+          android: true
+          dotnet: true
+          haskell: true
+          large-packages: true
+          swap-storage: false
+
+      - uses: actions/checkout@v6
+
+      - uses: astral-sh/setup-uv@v8.1.0
+        with:
+          enable-cache: true
+
+      - name: Setup Python
+        run: uv python install 3.12
+
+      - name: Install deps
+        run: uv sync
+
+      - name: Download raw_acts.jsonl
+        uses: actions/download-artifact@v6
+        with:
+          name: raw-acts
+          path: data/
 
       - name: Transform → Load (parquet + Pandera validation + FTS)
         run: uv run python -m etl.transform
