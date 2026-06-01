@@ -1,0 +1,54 @@
+name: probe-actiuni
+
+# Decides per-IP vs global rate-limit before we build the backfill matrix.
+# Dispatch once with parallel_ips=1 (baseline), once with parallel_ips=3.
+# Compare per-runner rate_req_s in the run summary:
+#   per-IP cap -> rate stays flat at 3  (matrix backfill ~3x: worth building)
+#   global cap -> rate drops to ~1/3    (matrix pointless; rely on delta only)
+
+on:
+  workflow_dispatch:
+    inputs:
+      parallel_ips:
+        description: "Concurrent runners (=IPs). Run with 1, then 3, compare."
+        default: "1"
+      requests:
+        description: "Requests per runner."
+        default: "300"
+      concurrency:
+        description: "In-runner concurrency."
+        default: "20"
+
+jobs:
+  setup:
+    runs-on: ubuntu-latest
+    outputs:
+      shards: ${{ steps.gen.outputs.shards }}
+    steps:
+      - id: gen
+        run: echo "shards=$(seq 1 ${{ inputs.parallel_ips }} | jq -R . | jq -cs .)" >> "$GITHUB_OUTPUT"
+
+  probe:
+    needs: setup
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: ${{ fromJSON(needs.setup.outputs.shards) }}
+    env:
+      PROBE_LABEL: ip-${{ matrix.shard }}
+    steps:
+      - uses: actions/checkout@v6
+      - uses: astral-sh/setup-uv@v8.1.0
+        with:
+          enable-cache: true
+      - run: uv python install 3.12
+      - run: uv sync
+      - name: Probe
+        run: |
+          uv run python -m etl.probe_actiuni \
+            --requests ${{ inputs.requests }} \
+            --concurrency ${{ inputs.concurrency }} \
+            | tee probe.out
+          grep PROBE_RESULT probe.out >> "$GITHUB_STEP_SUMMARY"
