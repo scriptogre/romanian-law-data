@@ -3,8 +3,9 @@ Stage 1 — extract.py
 
 Thin dispatcher over the per-source extractions in `extracts/`:
 
-    python -m etl.extract           # soap  : the SOAP corpus walk -> raw_acts.jsonl
-    python -m etl.extract actiuni   # web   : the /Public/actiuni* endpoints -> cache
+    python -m etl.extract                 # soap  : SOAP corpus walk -> raw_acts.jsonl
+    python -m etl.extract actiuni         # web   : fetch one /Public/actiuni* shard
+    python -m etl.extract actiuni-merge   # web   : fold shards into cache + publish
 
 Each source module owns its own client/session and resume state.
 """
@@ -18,6 +19,8 @@ STAGES = {
     "documents": soap.run,
     "actiuni": web.run,
     "web": web.run,
+    "actiuni-merge": web.merge,
+    "web-merge": web.merge,
 }
 
 

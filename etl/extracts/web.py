@@ -4,25 +4,26 @@ Stage 1 (alt) — extracts/web.py
 Fetch per-act `actiuni` HTML from legislatie.just.ro's own web endpoints
 (`/Public/actiuniSuferite`, `/Public/actiuniInduse`), separate from the SOAP
 API in soap.py. Output: a durable cache parquet
-(act_id -> suferite_html, induse_html, fetched_at) published as a release asset,
-so the slow per-act fetch runs once and later syncs fetch only the delta.
+(act_id -> suferite_html, induse_html, fetched_at) published as a release asset.
 
-The endpoints 503 and refuse connections intermittently under load. The probe
-showed the killer is the connect hang (a refused connection costs the full 30s
-timeout, collapsing throughput to ~1/s), not concurrency. So: a SHORT connect
-timeout (fail fast), modest concurrency, and a few retry passes over the acts
-that failed - transient failures clear on a later pass.
+THROTTLE: the site runs a per-IP token bucket - a few hundred acts fetch fast,
+then that IP is choked to ~1 req/s (connections start timing out). One IP cannot
+do the backfill. So the work is SHARDED across many runners (= many IPs): each
+runner fetches its slice (ids[shard::shards]) and writes a shard parquet; a
+separate merge step folds the shards into the cache and publishes. Resumable:
+`run()` fetches only acts NOT already cached, so re-dispatching reshards whatever
+is still missing until the cache is full.
 
-Runs in chunks: after each chunk the cache is saved AND (in CI) re-published, so
-a 6h-timeout or crash mid-run leaves a published cache to resume from. `run()`
-fetches only acts NOT already cached, so a re-run continues where it stopped.
-Progress (count, rate, ETA) is logged every few seconds within a chunk.
+Within a runner: SHORT connect timeout (a refused connection fails in 5s, not
+30s), modest concurrency, a few retry passes. Progress (ok/processed, rate, ETA)
+logs every few seconds, and the shard parquet is checkpointed to disk per chunk.
 
-Delta (ETL_ACTIUNI_MODE=delta): new acts + a rolling reconcile slice
-(oldest-fetched first) to bound staleness. NOTE: an OLD act's status changes when
-ANOTHER act amends/repeals it; the full fix parses each new act's induse HTML for
-its target ids and re-fetches those. That parser does not exist yet, so today's
-delta = new + reconcile only.
+Env:
+  ETL_ACTIUNI_MODE      backfill | delta (default delta)
+  ETL_ACTIUNI_SHARD     this runner's index, 0-based (default 0)
+  ETL_ACTIUNI_SHARDS    total runners (default 1)
+  ETL_ACTIUNI_LIMIT     cap ids (smoke test)
+  ETL_ACTIUNI_RELEASE_TAG  merge stage publishes the cache to this tag (CI only)
 """
 
 import asyncio
@@ -48,13 +49,13 @@ CONCURRENCY = int(os.environ.get("ETL_ACTIUNI_CONCURRENCY", 8))
 CONNECT_TIMEOUT = 5
 READ_TIMEOUT = 30
 RETRY_PASSES = 3
-CHUNK = int(os.environ.get("ETL_ACTIUNI_CHUNK", 20000))
+CHUNK = int(os.environ.get("ETL_ACTIUNI_CHUNK", 5000))
 
 REPO_ROOT = Path(__file__).parent.parent.parent
-CORPUS_PATH = REPO_ROOT / "data" / "acte.parquet"
-CACHE_PATH = REPO_ROOT / "data" / "actiuni_cache.parquet"
+DATA_DIR = REPO_ROOT / "data"
+CORPUS_PATH = DATA_DIR / "acte.parquet"
+CACHE_PATH = DATA_DIR / "actiuni_cache.parquet"
 RECONCILE_FRACTION = float(os.environ.get("ETL_ACTIUNI_RECONCILE", 0.0333))  # ~1/30 -> ~monthly
-# Set in CI to publish each checkpoint to this release tag. Unset locally = no publish.
 RELEASE_TAG = os.environ.get("ETL_ACTIUNI_RELEASE_TAG")
 
 CACHE_SCHEMA = {
@@ -131,9 +132,10 @@ async def _one_pass(session: requests.Session, ids: list[str]) -> dict[str, tupl
             now = time.time()
             if now - last_log >= 15:
                 last_log = now
+                ok = sum(1 for s, i in result.values() if s is not None and i is not None)
                 rate = len(result) / (now - start)
                 eta_min = (len(ids) - len(result)) / rate / 60 if rate else 0
-                logger.info(f"  {len(result)}/{len(ids)} acts ({rate:.0f}/s, ETA {eta_min:.0f}m)")
+                logger.info(f"  {len(result)}/{len(ids)} done, {ok} ok ({rate:.1f}/s, ETA {eta_min:.0f}m)")
 
     await asyncio.gather(*(one(a) for a in ids))
     return result
@@ -161,33 +163,21 @@ async def fetch(ids: list[str]) -> list[dict]:
     ]
 
 
-# --- publish (CI only) -----------------------------------------------------
-
-def _publish() -> None:
-    """Upload the cache parquet to the RELEASE_TAG release (clobber the asset)."""
-    if not RELEASE_TAG:
-        return
-    exists = subprocess.run(["gh", "release", "view", RELEASE_TAG], capture_output=True).returncode == 0
-    if not exists:
-        subprocess.run(
-            ["gh", "release", "create", RELEASE_TAG, "--title", "web endpoint cache",
-             "--notes", "Per-act actiuni HTML from legislatie.just.ro /Public. Rebuilt by sync-web."],
-            check=True,
-        )
-    subprocess.run(["gh", "release", "upload", RELEASE_TAG, str(CACHE_PATH), "--clobber"], check=True)
-
-
 # --- orchestration ---------------------------------------------------------
 
-def run() -> None:
-    """Fetch the actiuni delta (or full backfill) into the cache, in chunks.
+def _shard_path(shard: int) -> Path:
+    return DATA_DIR / f"actiuni_shard_{shard}.parquet"
 
-    Env: ETL_ACTIUNI_MODE=backfill|delta (default delta), ETL_ACTIUNI_LIMIT=N
-    (cap ids, for smoke tests). Reads the corpus from data/acte.parquet and the
-    existing cache from data/actiuni_cache.parquet (both fetched by the workflow).
-    Saves + (if ETL_ACTIUNI_RELEASE_TAG set) publishes after every chunk.
+
+def run() -> None:
+    """Fetch this shard's uncached acts, in chunks, into its shard parquet.
+
+    Does NOT publish or touch the cache; the merge stage folds shards in. Sharded
+    so many runners (= many IPs) split the work past the per-IP throttle.
     """
     mode = os.environ.get("ETL_ACTIUNI_MODE", "delta")
+    shard = int(os.environ.get("ETL_ACTIUNI_SHARD", 0))
+    shards = int(os.environ.get("ETL_ACTIUNI_SHARDS", 1))
     limit_raw = os.environ.get("ETL_ACTIUNI_LIMIT")
 
     corpus = pl.read_parquet(CORPUS_PATH)
@@ -195,17 +185,43 @@ def run() -> None:
     cache = load_cache()
 
     reconcile = RECONCILE_FRACTION if mode == "delta" else 0.0
-    ids = ids_to_fetch(all_ids, cache, reconcile)
+    ids = ids_to_fetch(all_ids, cache, reconcile)[shard::shards]
     if limit_raw:
         ids = ids[: int(limit_raw)]
-    logger.info(f"actiuni {mode}: {len(ids)} to fetch (corpus={len(all_ids)}, cached={len(cache)})")
+    logger.info(f"actiuni {mode} shard {shard}/{shards}: {len(ids)} to fetch (uncached total slice)")
 
+    out = _shard_path(shard)
+    rows: list[dict] = []
     for start in range(0, len(ids), CHUNK):
-        chunk = ids[start : start + CHUNK]
-        rows = asyncio.run(fetch(chunk))
-        cache = merge_cache(cache, rows)
-        cache.write_parquet(CACHE_PATH, compression="zstd")
-        _publish()
-        logger.success(f"checkpoint {min(start + CHUNK, len(ids))}/{len(ids)} done, cache={len(cache)} acts")
+        rows += asyncio.run(fetch(ids[start : start + CHUNK]))
+        pl.DataFrame(rows, schema=CACHE_SCHEMA).write_parquet(out, compression="zstd")
+        logger.success(f"shard {shard}: {len(rows)} ok / {min(start + CHUNK, len(ids))} processed -> {out.name}")
 
-    logger.success(f"actiuni {mode} done: cache={len(cache)} acts -> {CACHE_PATH}")
+    logger.success(f"shard {shard} done: {len(rows)} acts fetched")
+
+
+def merge() -> None:
+    """Fold all shard parquets into the cache and publish it."""
+    cache = load_cache()
+    shard_files = sorted(DATA_DIR.glob("actiuni_shard_*.parquet"))
+    rows = (
+        pl.concat([pl.read_parquet(f) for f in shard_files]).to_dicts() if shard_files else []
+    )
+    merged = merge_cache(cache, rows)
+    merged.write_parquet(CACHE_PATH, compression="zstd")
+    logger.success(f"merge: cache {len(cache)} -> {len(merged)} (+{len(rows)} from {len(shard_files)} shards)")
+
+    corpus = pl.read_parquet(CORPUS_PATH)
+    all_ids = corpus["link"].str.extract(r"(\d+)\s*$", 1).drop_nulls().to_list()
+    remaining = len(set(all_ids) - set(merged["act_id"].to_list()))
+    logger.info(f"REMAINING={remaining}")
+
+    if RELEASE_TAG:
+        exists = subprocess.run(["gh", "release", "view", RELEASE_TAG], capture_output=True).returncode == 0
+        if not exists:
+            subprocess.run(
+                ["gh", "release", "create", RELEASE_TAG, "--title", "web endpoint cache",
+                 "--notes", "Per-act actiuni HTML from legislatie.just.ro /Public. Rebuilt by sync-web."],
+                check=True,
+            )
+        subprocess.run(["gh", "release", "upload", RELEASE_TAG, str(CACHE_PATH), "--clobber"], check=True)

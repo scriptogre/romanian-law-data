@@ -1,17 +1,15 @@
 name: sync-web
 
-# DRAFT. Builds/refreshes the durable web-endpoint cache (a release asset) on a
-# single runner via `python -m etl.extract actiuni` (etl/extracts/web.py).
-# Backfill once (mode=backfill), then a cheap nightly delta. web.run fetches in
-# chunks, saving + re-publishing the cache after each, so a timeout or crash
-# mid-run leaves a published cache to resume from (it fetches only uncached acts).
-# Parsing the HTML into status/relationships + republishing the corpus is a
-# separate downstream step (parsers do not exist yet) - see TODO.
+# Builds/refreshes the durable web-endpoint cache (a release asset) via
+# `etl/extracts/web.py`. legislatie.just.ro throttles per IP (a few hundred acts
+# fast, then ~1 req/s), so one runner can't do it. The work is SHARDED across N
+# runners (= N IPs): each fetches ids[shard::N] into a shard parquet; the merge
+# job folds shards into the cache and publishes. Resumable: each round fetches
+# only still-uncached acts, so re-dispatch until merge logs REMAINING=0.
 #
-# BAKED CHOICES TO CONFIRM:
-#  - cache persisted as a single rolling release tag `web-cache`
-#  - corpus (act ids) sourced from the latest `laws/*` release `acte.parquet`
-#  - delta = new acts + a 1/30 reconcile slice (no induse-propagation yet)
+# Backfill: dispatch mode=backfill (raise `shards`). Nightly: delta (small).
+# TODO downstream (needs parsers + cache wired into transform):
+#   suferite_html -> status / in_force_until; induse_html -> relationships.
 
 on:
   schedule:
@@ -19,29 +17,42 @@ on:
   workflow_dispatch:
     inputs:
       mode:
-        description: "backfill (all uncached acts) or delta (new + reconcile)."
+        description: "backfill (all uncached) or delta (new + reconcile)."
         default: "delta"
         type: choice
         options: ["delta", "backfill"]
-      limit:
-        description: "Cap ids fetched (smoke test). Empty = no cap."
-        default: ""
+      shards:
+        description: "Parallel runners (= IPs)."
+        default: "16"
 
 permissions:
   contents: write
 
 env:
-  CACHE_TAG: web-cache
+  SHARDS: ${{ inputs.shards || '16' }}
+  ETL_ACTIUNI_MODE: ${{ inputs.mode || 'delta' }}
+  GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
 jobs:
-  extract_publish:
+  prepare:
+    runs-on: ubuntu-latest
+    outputs:
+      matrix: ${{ steps.gen.outputs.matrix }}
+    steps:
+      - id: gen
+        run: echo "matrix=$(seq 0 $((SHARDS - 1)) | jq -R . | jq -cs .)" >> "$GITHUB_OUTPUT"
+
+  fetch:
+    needs: prepare
     runs-on: ubuntu-latest
     timeout-minutes: 350
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: ${{ fromJSON(needs.prepare.outputs.matrix) }}
     env:
-      ETL_ACTIUNI_MODE: ${{ inputs.mode || 'delta' }}
-      ETL_ACTIUNI_LIMIT: ${{ inputs.limit }}
-      ETL_ACTIUNI_RELEASE_TAG: web-cache
-      GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      ETL_ACTIUNI_SHARD: ${{ matrix.shard }}
+      ETL_ACTIUNI_SHARDS: ${{ inputs.shards || '16' }}
     steps:
       - uses: actions/checkout@v6
       - uses: astral-sh/setup-uv@v8.1.0
@@ -49,18 +60,44 @@ jobs:
           enable-cache: true
       - run: uv python install 3.12
       - run: uv sync
-
-      - name: Download latest corpus + current cache (cache may not exist yet)
+      - name: Download corpus + current cache
         run: |
           mkdir -p data
           LATEST=$(gh release list --json tagName --jq '[.[] | select(.tagName | startswith("laws/"))][0].tagName')
           gh release download "$LATEST" --pattern 'acte.parquet' --dir data
-          gh release download "$CACHE_TAG" --pattern 'actiuni_cache.parquet' --dir data || echo "no cache yet (first backfill)"
-
-      - name: Fetch -> cache (chunked, saves + publishes each chunk)
+          gh release download web-cache --pattern 'actiuni_cache.parquet' --dir data || echo "no cache yet"
+      - name: Fetch shard
         run: uv run python -m etl.extract actiuni
+      - uses: actions/upload-artifact@v7
+        if: always()
+        with:
+          name: actiuni-shard-${{ matrix.shard }}
+          path: data/actiuni_shard_*.parquet
+          if-no-files-found: ignore
 
-# TODO (downstream, needs parsers + the cache wired into transform):
-#  parse suferite_html -> status / in_force_until,
-#  parse induse_html  -> relationships (+ propagate status to targets),
-#  join the cache in transforms/status.py, republish the corpus release.
+  merge:
+    needs: fetch
+    if: always()
+    runs-on: ubuntu-latest
+    env:
+      ETL_ACTIUNI_RELEASE_TAG: web-cache
+    steps:
+      - uses: actions/checkout@v6
+      - uses: astral-sh/setup-uv@v8.1.0
+        with:
+          enable-cache: true
+      - run: uv python install 3.12
+      - run: uv sync
+      - name: Download corpus + current cache
+        run: |
+          mkdir -p data
+          LATEST=$(gh release list --json tagName --jq '[.[] | select(.tagName | startswith("laws/"))][0].tagName')
+          gh release download "$LATEST" --pattern 'acte.parquet' --dir data
+          gh release download web-cache --pattern 'actiuni_cache.parquet' --dir data || echo "first round, no cache"
+      - uses: actions/download-artifact@v6
+        with:
+          pattern: actiuni-shard-*
+          path: data
+          merge-multiple: true
+      - name: Merge shards -> cache + publish
+        run: uv run python -m etl.extract actiuni-merge
