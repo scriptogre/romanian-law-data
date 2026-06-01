@@ -1,14 +1,15 @@
 name: sync-web
 
-# DRAFT. Builds/refreshes the durable actiuni HTML cache (a release asset) on a
+# DRAFT. Builds/refreshes the durable web-endpoint cache (a release asset) on a
 # single runner via `python -m etl.extract actiuni` (etl/extracts/web.py).
-# Backfill once (mode=backfill), then a cheap nightly delta. Resumable: web.run
-# fetches only acts NOT already in the cache, so a timed-out run just re-runs.
+# Backfill once (mode=backfill), then a cheap nightly delta. web.run fetches in
+# chunks, saving + re-publishing the cache after each, so a timeout or crash
+# mid-run leaves a published cache to resume from (it fetches only uncached acts).
 # Parsing the HTML into status/relationships + republishing the corpus is a
 # separate downstream step (parsers do not exist yet) - see TODO.
 #
 # BAKED CHOICES TO CONFIRM:
-#  - cache persisted as a single rolling release tag `actiuni-cache`
+#  - cache persisted as a single rolling release tag `web-cache`
 #  - corpus (act ids) sourced from the latest `laws/*` release `acte.parquet`
 #  - delta = new acts + a 1/30 reconcile slice (no induse-propagation yet)
 
@@ -30,7 +31,7 @@ permissions:
   contents: write
 
 env:
-  CACHE_TAG: actiuni-cache
+  CACHE_TAG: web-cache
 
 jobs:
   extract_publish:
@@ -39,6 +40,7 @@ jobs:
     env:
       ETL_ACTIUNI_MODE: ${{ inputs.mode || 'delta' }}
       ETL_ACTIUNI_LIMIT: ${{ inputs.limit }}
+      ETL_ACTIUNI_RELEASE_TAG: web-cache
       GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
     steps:
       - uses: actions/checkout@v6
@@ -55,16 +57,8 @@ jobs:
           gh release download "$LATEST" --pattern 'acte.parquet' --dir data
           gh release download "$CACHE_TAG" --pattern 'actiuni_cache.parquet' --dir data || echo "no cache yet (first backfill)"
 
-      - name: Fetch actiuni -> cache
+      - name: Fetch -> cache (chunked, saves + publishes each chunk)
         run: uv run python -m etl.extract actiuni
-
-      - name: Publish cache release
-        run: |
-          gh release delete "$CACHE_TAG" --yes 2>/dev/null || true
-          git push origin ":refs/tags/$CACHE_TAG" 2>/dev/null || true
-          gh release create "$CACHE_TAG" data/actiuni_cache.parquet \
-            --title "actiuni HTML cache" \
-            --notes "Rolling per-act actiuni HTML cache. Rebuilt by sync-web."
 
 # TODO (downstream, needs parsers + the cache wired into transform):
 #  parse suferite_html -> status / in_force_until,
