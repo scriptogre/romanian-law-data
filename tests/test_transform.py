@@ -286,26 +286,6 @@ def test_derive_status_per_article_abrogat_is_not_act_abrogat():
 # ── dedup (continued) ───────────────────────────────────────────────────────
 
 
-def test_collapse_code_twins_drops_codul_x_with_lege_ref():
-    lf = pl.LazyFrame(
-        {
-            "TipAct": ["LEGE", "CODUL CIVIL", "CODUL CIVIL", "DECIZIE"],
-            "Titlu": [
-                "LEGE nr. 287 din 17 iulie 2009 privind Codul civil",
-                "CODUL CIVIL din 17 iulie 2009 (*republicat*) ( LEGE nr. 287/2009 )",
-                "CODUL CIVIL din 26 noiembrie 1864",  # old code, no LEGE ref → keep
-                "DECIZIA nr. 62 ( LEGE nr. 287/2009 )",  # not COD* → keep
-            ],
-        }
-    )
-    out = dedup.collapse_code_twins(lf).collect()
-    titles = out["Titlu"].to_list()
-    assert "LEGE nr. 287 din 17 iulie 2009 privind Codul civil" in titles
-    assert "CODUL CIVIL din 26 noiembrie 1864" in titles
-    assert "DECIZIA nr. 62 ( LEGE nr. 287/2009 )" in titles
-    assert all("(*republicat*)" not in t for t in titles)
-
-
 # ── parse ───────────────────────────────────────────────────────────────────
 
 

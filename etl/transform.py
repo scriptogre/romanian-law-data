@@ -77,7 +77,6 @@ def cleanup(lf: pl.LazyFrame) -> pl.LazyFrame:
         .pipe(dates.extract_effective)
         .pipe(dates.clamp_far_future)
         .pipe(dedup.by_titlu_emitent)
-        .pipe(dedup.collapse_code_twins)
         .pipe(status.add_status)
     )
 
