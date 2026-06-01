@@ -33,7 +33,7 @@ env:
   CACHE_TAG: actiuni-cache
 
 jobs:
-  fetch_publish:
+  extract_publish:
     runs-on: ubuntu-latest
     timeout-minutes: 350
     env:
