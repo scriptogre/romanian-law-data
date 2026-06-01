@@ -150,15 +150,19 @@ def extract_adopted(lf: pl.LazyFrame) -> pl.LazyFrame:
 
 
 def extract_gazette(lf: pl.LazyFrame) -> pl.LazyFrame:
-    """Extract MO publication date + issue number from the Text header."""
+    """Extract MO publication date + issue number from the Text header.
+
+    Monitorul Oficial issues start at 1, so a parsed `0` is always garbage
+    (typo, OCR artefact, malformed header) — coerce to NULL.
+    """
     m = pl.col("Text").fill_null("").str.extract_groups(_MO_PATTERN)
     iso = _iso_from_groups(m, "2", "3", "4")
+    parsed_number = (
+        m.struct.field("1").str.replace_all(r"\.", "").cast(pl.Int64, strict=False)
+    )
     return lf.with_columns(
         iso.str.strptime(pl.Date, "%Y-%m-%d", strict=False).cast(pl.Utf8).alias("PublishedAt"),
-        m.struct.field("1")
-        .str.replace_all(r"\.", "")
-        .cast(pl.Int64, strict=False)
-        .alias("GazetteNumber"),
+        pl.when(parsed_number > 0).then(parsed_number).otherwise(None).alias("GazetteNumber"),
     )
 
 
