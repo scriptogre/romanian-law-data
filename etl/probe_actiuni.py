@@ -1,16 +1,17 @@
 """
-Probe: is legislatie.just.ro's `actiuni` rate-limit per-IP or global, and WHY do
-slow runners fail (429 rate-limit vs 403 block vs timeout vs network)?
+Probe: find the actiuni concurrency sweet spot, and see WHY requests fail.
 
-extract.py assumes a single global per-second cap. The probe-actiuni workflow
-runs this identical workload from N runners (N IPs) at once. Read per-runner:
-    rate_req_s  : flat as N grows -> per-IP cap; drops ~1/N -> global cap
-    outcomes    : the raw HTTP status / exception mix (the "why")
+The server returns 503 under concurrent load (not 403/429/timeout): too much
+concurrency = more 503s, too little = idle capacity. The sweet spot maximises
+GOODPUT (successful 200s per second), not raw request rate.
 
-Single attempt per request, no retry/backoff, so the rate and the status mix
-reflect the server's actual response rather than client backoff.
+`--sweep "2,5,10,20,40"` runs the same workload at each concurrency level
+back-to-back in ONE process (same IP, same minute), so concurrency is the only
+variable. Single attempt per request, no retry, so the 503 rate is the raw
+server signal rather than client backoff.
 
-Usage: uv run python -m etl.probe_actiuni --requests 300 --concurrency 20
+Usage:
+  uv run python -m etl.probe_actiuni --sweep "2,5,10,20,40" --requests 300
 """
 
 import argparse
@@ -48,7 +49,37 @@ def _post_once(client: LegislatieJustRoClient, endpoint: str, act_id: str) -> st
         return type(exc).__name__
 
 
-async def probe(total_requests: int, concurrency: int, endpoint: str) -> None:
+async def _run_level(
+    client: LegislatieJustRoClient, targets: list[str], concurrency: int, endpoint: str
+) -> None:
+    sem = asyncio.Semaphore(concurrency)
+    outcomes: Counter[str] = Counter()
+
+    async def one(act_id: str) -> None:
+        async with sem:
+            outcomes[await asyncio.to_thread(_post_once, client, endpoint, act_id)] += 1
+
+    start = time.time()
+    await asyncio.gather(*(one(a) for a in targets))
+    elapsed = time.time() - start
+
+    rate = len(targets) / elapsed if elapsed else 0.0
+    goodput = outcomes.get("200", 0) / elapsed if elapsed else 0.0
+    fail_pct = 100 * (1 - outcomes.get("200", 0) / len(targets)) if targets else 0.0
+    breakdown = " ".join(f"{code}={n}" for code, n in sorted(outcomes.items()))
+    label = os.environ.get("PROBE_LABEL", "solo")
+
+    logger.success(
+        f"[{label}] concurrency={concurrency}: {rate:.0f} req/s, "
+        f"goodput={goodput:.0f} ok/s, fail={fail_pct:.0f}% | {breakdown}"
+    )
+    print(
+        f"PROBE_RESULT label={label} concurrency={concurrency} "
+        f"rate_req_s={rate:.1f} goodput_ok_s={goodput:.1f} fail_pct={fail_pct:.0f} outcomes[{breakdown}]"
+    )
+
+
+async def probe(levels: list[int], total_requests: int, endpoint: str) -> None:
     client = LegislatieJustRoClient()
     ids = await _gather_ids(client, total_requests)
     if not ids:
@@ -57,35 +88,19 @@ async def probe(total_requests: int, concurrency: int, endpoint: str) -> None:
     pool = cycle(ids)
     targets = [next(pool) for _ in range(total_requests)]
 
-    sem = asyncio.Semaphore(concurrency)
-    outcomes: Counter[str] = Counter()
-
-    async def one(act_id: str) -> None:
-        async with sem:
-            outcome = await asyncio.to_thread(_post_once, client, endpoint, act_id)
-            outcomes[outcome] += 1
-
-    start = time.time()
-    await asyncio.gather(*(one(a) for a in targets))
-    elapsed = time.time() - start
-    rate = total_requests / elapsed if elapsed else 0.0
-
-    label = os.environ.get("PROBE_LABEL", "solo")
-    breakdown = " ".join(f"{code}={n}" for code, n in sorted(outcomes.items()))
-    logger.success(
-        f"[{label}] {total_requests} req @ concurrency {concurrency} on {endpoint}: "
-        f"{elapsed:.1f}s -> {rate:.1f} req/s | {breakdown}"
-    )
-    print(f"PROBE_RESULT label={label} rate_req_s={rate:.2f} elapsed_s={elapsed:.1f} outcomes[{breakdown}]")
+    for concurrency in levels:
+        await _run_level(client, targets, concurrency, endpoint)
+        await asyncio.sleep(2)  # let the server breathe between levels
 
 
 def main() -> None:
     ap = argparse.ArgumentParser()
+    ap.add_argument("--sweep", default="20", help="comma-separated concurrency levels")
     ap.add_argument("--requests", type=int, default=300)
-    ap.add_argument("--concurrency", type=int, default=20)
     ap.add_argument("--endpoint", default="actiuniSuferite", choices=("actiuniSuferite", "actiuniInduse"))
     args = ap.parse_args()
-    asyncio.run(probe(args.requests, args.concurrency, args.endpoint))
+    levels = [int(x) for x in args.sweep.split(",") if x.strip()]
+    asyncio.run(probe(levels, args.requests, args.endpoint))
 
 
 if __name__ == "__main__":

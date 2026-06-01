@@ -1,43 +1,24 @@
 name: probe-actiuni
 
-# Decides per-IP vs global rate-limit before we build the backfill matrix.
-# Dispatch once with parallel_ips=1 (baseline), once with parallel_ips=3.
-# Compare per-runner rate_req_s in the run summary:
-#   per-IP cap -> rate stays flat at 3  (matrix backfill ~3x: worth building)
-#   global cap -> rate drops to ~1/3    (matrix pointless; rely on delta only)
+# Finds the actiuni concurrency sweet spot (max goodput before 503s dominate).
+# One runner sweeps concurrency levels back-to-back; compare goodput_ok_s in the
+# run summary. The failures are 503 (server choke), not 403/429 - so this is
+# about pacing one IP, not parallelising across IPs.
 
 on:
   workflow_dispatch:
     inputs:
-      parallel_ips:
-        description: "Concurrent runners (=IPs). Run with 1, then 3, compare."
-        default: "1"
+      sweep:
+        description: "Concurrency levels to sweep, comma-separated."
+        default: "2,5,10,20,40"
       requests:
-        description: "Requests per runner."
+        description: "Requests per level."
         default: "300"
-      concurrency:
-        description: "In-runner concurrency."
-        default: "20"
 
 jobs:
-  setup:
-    runs-on: ubuntu-latest
-    outputs:
-      shards: ${{ steps.gen.outputs.shards }}
-    steps:
-      - id: gen
-        run: echo "shards=$(seq 1 ${{ inputs.parallel_ips }} | jq -R . | jq -cs .)" >> "$GITHUB_OUTPUT"
-
   probe:
-    needs: setup
     runs-on: ubuntu-latest
     timeout-minutes: 30
-    strategy:
-      fail-fast: false
-      matrix:
-        shard: ${{ fromJSON(needs.setup.outputs.shards) }}
-    env:
-      PROBE_LABEL: ip-${{ matrix.shard }}
     steps:
       - uses: actions/checkout@v6
       - uses: astral-sh/setup-uv@v8.1.0
@@ -48,7 +29,7 @@ jobs:
       - name: Probe
         run: |
           uv run python -m etl.probe_actiuni \
+            --sweep "${{ inputs.sweep }}" \
             --requests ${{ inputs.requests }} \
-            --concurrency ${{ inputs.concurrency }} \
             | tee probe.out
           grep PROBE_RESULT probe.out >> "$GITHUB_STEP_SUMMARY"
