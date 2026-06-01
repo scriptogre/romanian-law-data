@@ -1,4 +1,4 @@
-name: sync
+name: sync-soap
 
 on:
   schedule:
@@ -24,10 +24,10 @@ jobs:
     env:
       ETL_MAX_ACTS: ${{ inputs.max_acts }}
       ETL_CONCURRENCY: "20"
-      # Skip per-act actiuni HTML enrichment for full-corpus runs — it makes
-      # per-act HTTP work ~20x and doesn't fit the CI budget. The `status`
-      # column will be NULL for builds produced here. TODO: ship a separate
-      # enrichment workflow that runs after this and back-fills status.
+      # Skip per-act actiuni HTML here; that source is fetched separately by the
+      # sync-web workflow (etl/extracts/web.py) into its own cache, on its own
+      # cadence. Builds from this workflow have a NULL status column until the
+      # cache is wired into transform.
       ETL_FETCH_ACTIUNI: "false"
     steps:
       - name: Free disk space

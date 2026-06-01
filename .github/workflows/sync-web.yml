@@ -1,4 +1,4 @@
-name: fetch-actiuni
+name: sync-web
 
 # DRAFT. Builds/refreshes the durable actiuni HTML cache (a release asset) on a
 # single runner via `python -m etl.extract actiuni` (etl/extracts/web.py).
@@ -64,7 +64,7 @@ jobs:
           git push origin ":refs/tags/$CACHE_TAG" 2>/dev/null || true
           gh release create "$CACHE_TAG" data/actiuni_cache.parquet \
             --title "actiuni HTML cache" \
-            --notes "Rolling per-act actiuni HTML cache. Rebuilt by fetch-actiuni."
+            --notes "Rolling per-act actiuni HTML cache. Rebuilt by sync-web."
 
 # TODO (downstream, needs parsers + the cache wired into transform):
 #  parse suferite_html -> status / in_force_until,
