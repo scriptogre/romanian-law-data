@@ -190,6 +190,11 @@ def main() -> None:
             _parsed_records(parsed_iter, report, bands, gates, scoresum)
         )
 
+    # The cleaned DataFrame holds full body text for ~250k acts (3-5 GB
+    # uncompressed). Release before Pandera reloads the acte parquet, which
+    # otherwise OOMs the 16 GB CI runner.
+    del df
+
     avg = scoresum[0] / n_unique if n_unique else 0.0
     logger.info(f"  acte:     {n_acts:>8d} rows")
     logger.info(f"  articole: {n_articles:>8d} rows")

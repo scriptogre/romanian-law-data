@@ -18,6 +18,12 @@ import polars as pl
 from loguru import logger
 
 
+# `content` is intentionally omitted from every schema. The PyArrow writer
+# already enforces `string` dtype on write, so the only thing Pandera would add
+# is "is a string" — at the cost of materializing 3-5 GB of body text into
+# memory during validation, which OOMs the 16 GB CI runner.
+
+
 class Acts(pa.DataFrameModel):
     id: int = pa.Field(unique=True, ge=1)
     type: str
@@ -25,7 +31,6 @@ class Acts(pa.DataFrameModel):
     act_citation: str
     issuer: str
     title: str
-    content: str
     adopted_at: date = pa.Field(nullable=True)
     published_at: date = pa.Field(nullable=True)
     effective_at: date = pa.Field(nullable=True)
@@ -41,7 +46,6 @@ class Articles(pa.DataFrameModel):
     article_number: int = pa.Field(nullable=True)
     article_variant: str = pa.Field(nullable=True)
     article_citation: str
-    content: str = pa.Field(nullable=True)
 
 
 class Paragraphs(pa.DataFrameModel):
@@ -49,7 +53,6 @@ class Paragraphs(pa.DataFrameModel):
     article_id: int = pa.Field(ge=1)
     paragraph_number: int = pa.Field(nullable=True)
     paragraph_citation: str
-    content: str = pa.Field(nullable=True)
 
 
 def check_referential_integrity(
@@ -77,14 +80,17 @@ def validate_parquets(
 ) -> None:
     """Validate the three written parquets against the schemas + FK integrity.
 
-    Reads via Polars (eager — needed for Pandera Polars schema validation).
+    Pandera Polars needs an eager DataFrame to validate, but the `content`
+    columns dominate memory (3-5 GB uncompressed) and have no schema check
+    beyond "is a string" — which the parquet writer already enforced. We
+    project them out before collect so the 16 GB CI runner survives.
     Raises pandera.errors.SchemaError on column-level violations,
     ValueError on FK violations.
     """
     logger.info("schemas: validating parquets...")
-    acts = pl.read_parquet(acts_path)
-    articles = pl.read_parquet(articles_path)
-    paragraphs = pl.read_parquet(paragraphs_path)
+    acts = pl.scan_parquet(acts_path).drop("content").collect()
+    articles = pl.scan_parquet(articles_path).drop("content").collect()
+    paragraphs = pl.scan_parquet(paragraphs_path).drop("content").collect()
 
     Acts.validate(acts, lazy=True)
     Articles.validate(articles, lazy=True)
