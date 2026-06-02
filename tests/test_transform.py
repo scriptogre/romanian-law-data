@@ -247,14 +247,14 @@ def test_derive_status_in_force_when_no_act_level_ops():
     html = """
     <table><tr><td>ART. 54</td><td>MODIFICAT DE</td><td>LEGE 200/2024</td></tr></table>
     """
-    assert status.derive_status(html) == "în vigoare"
+    assert status.derive_status(html) == "in_force"
 
 
 def test_derive_status_abrogat_on_act_level_abrogat():
     html = """
     <table><tr><td>Actul</td><td>ABROGAT DE</td><td>LEGE 187/2012</td></tr></table>
     """
-    assert status.derive_status(html) == "abrogat"
+    assert status.derive_status(html) == "repealed"
 
 
 def test_derive_status_in_force_when_abrogat_then_repus():
@@ -265,14 +265,14 @@ def test_derive_status_in_force_when_abrogat_then_repus():
       <tr><td>Actul</td><td>REPUS IN VIGOARE DE</td><td>LEGE 200/2012</td></tr>
     </table>
     """
-    assert status.derive_status(html) == "în vigoare"
+    assert status.derive_status(html) == "in_force"
 
 
 def test_derive_status_suspendat():
     html = """
     <table><tr><td>Actul</td><td>SUSPENDAT DE</td><td>OUG 50/2024</td></tr></table>
     """
-    assert status.derive_status(html) == "suspendat"
+    assert status.derive_status(html) == "suspended"
 
 
 def test_derive_status_per_article_abrogat_is_not_act_abrogat():
@@ -280,7 +280,7 @@ def test_derive_status_per_article_abrogat_is_not_act_abrogat():
     html = """
     <table><tr><td>ART. 12</td><td>ABROGAT DE</td><td>LEGE 200/2024</td></tr></table>
     """
-    assert status.derive_status(html) == "în vigoare"
+    assert status.derive_status(html) == "in_force"
 
 
 # ── dedup (continued) ───────────────────────────────────────────────────────

@@ -1,43 +1,45 @@
 """
-Status transform — derive an act's lifecycle from its actiuniSuferite HTML.
+Status transform — derive each act's lifecycle from the relationships cache.
 
-`extract.py` stores, per act, the raw HTML of the site's `actiuniSuferite`
-endpoint (what other acts have done TO this one). The act-level rows of that
-table state whether the act was repealed or suspended. We read those rows and
-collapse them into one word.
+extracts/relationships.py stores, per act, the raw HTML of the site's
+`actiuniSuferite` endpoint (what other acts have done TO this one) in
+`affected_by_html`. Its act-level rows state whether the act was repealed or
+suspended; we collapse them into one English status word:
 
-    abrogat      an act-level "ABROGAT DE" row, with no later "REPUS"
-    suspendat    an act-level "SUSPENDAT DE" row
-    în vigoare   none of the above (the act still applies)
+    repealed     an act-level "ABROGAT DE" row, with no later "REPUS"
+    suspended    an act-level "SUSPENDAT DE" row
+    in_force     none of the above (the act still applies)
 
 A row is act-level when its first cell is exactly "Actul". Per-article rows
-("ART. 54 MODIFICAT DE ...") sit in the same table but start with "ART." and
-do not change the act's status.
+("ART. 54 MODIFICAT DE ...") sit in the same table but start with "ART." and do
+not change the act's status.
 
-`None` means we never got the HTML (fetch failed, or pre-enrichment data), so
-status is unknown. An empty-but-present "Nu exista actiuni" reply is NOT None:
-it correctly yields "în vigoare".
+`None` = no HTML for this act (not in the cache), so status is unknown. An
+empty-but-present "Nu exista actiuni" reply is NOT None: it yields in_force.
 
-The date in a row is the date of the ACTING act, not the date this act stopped
-applying. So it does not give a trustworthy `valid_until`. See docs/source-api.md.
+The date in a row is the date of the ACTING act, not when this act stopped
+applying, so it does not give a trustworthy `in_force_until`. See docs/source-api.md.
 """
 
 import re
+from pathlib import Path
 
 import polars as pl
 
-REPEALED = "abrogat"
-SUSPENDED = "suspendat"
-IN_FORCE = "în vigoare"
+REPEALED = "repealed"
+SUSPENDED = "suspended"
+IN_FORCE = "in_force"
+
+CACHE_PATH = Path(__file__).parent.parent.parent / "data" / "raw_relationships.parquet"
 
 
-def derive_status(suferite_html: str | None) -> str | None:
-    """One status word from an actiuniSuferite HTML blob. None if not fetched."""
-    if not suferite_html:
+def derive_status(affected_by_html: str | None) -> str | None:
+    """One status word from an `affected_by_html` blob. None if not fetched."""
+    if not affected_by_html:
         return None
 
     act_level_ops = []
-    for row in re.split(r"</tr>", suferite_html, flags=re.IGNORECASE):
+    for row in re.split(r"</tr>", affected_by_html, flags=re.IGNORECASE):
         cells = [
             re.sub(r"\s+", " ", re.sub(r"<[^>]+>", "", cell)).strip()
             for cell in re.split(r"</t[dh]>", row, flags=re.IGNORECASE)
@@ -58,20 +60,28 @@ def derive_status(suferite_html: str | None) -> str | None:
 
 
 def add_status(lf: pl.LazyFrame) -> pl.LazyFrame:
-    """Add the `Status` column from an act's incoming relationships.
+    """Add the `Status` column by joining the relationships cache.
 
-    Those relationships now live in the separate relationships cache
-    (extracts/relationships.py), no longer inline in the raw documents, so this
-    yields NULL until that cache is wired into the pipeline. The inline path
-    below stays as the template for that wiring.
+    Status is derived from each act's incoming relationships (affected_by_html),
+    joined on the portal id in `LinkHtml`. Acts absent from the cache get NULL.
+    If the cache isn't present at all (e.g. a build without it), every act is NULL.
     """
-    present = set(lf.collect_schema().names())
-    if "actiuni_suferite" not in present:
+    if not CACHE_PATH.exists():
         return lf.with_columns(pl.lit(None, dtype=pl.Utf8).alias("Status"))
 
-    drop = [c for c in ("actiuni_suferite", "actiuni_induse") if c in present]
-    return lf.with_columns(
-        pl.col("actiuni_suferite")
-        .map_elements(derive_status, return_dtype=pl.Utf8)
-        .alias("Status")
-    ).drop(drop)
+    status_map = (
+        pl.read_parquet(CACHE_PATH, columns=["document_id", "affected_by_html"])
+        .with_columns(
+            pl.col("affected_by_html")
+            .map_elements(derive_status, return_dtype=pl.Utf8)
+            .alias("Status")
+        )
+        .select("document_id", "Status")
+        .lazy()
+    )
+
+    return (
+        lf.with_columns(pl.col("LinkHtml").str.extract(r"(\d+)\s*$", 1).alias("_doc_id"))
+        .join(status_map, left_on="_doc_id", right_on="document_id", how="left")
+        .drop("_doc_id")
+    )

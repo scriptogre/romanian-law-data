@@ -35,7 +35,7 @@ class Acts(pa.DataFrameModel):
     published_at: date = pa.Field(nullable=True)
     effective_at: date = pa.Field(nullable=True)
     gazette_number: int = pa.Field(nullable=True, ge=1)
-    status: str = pa.Field(nullable=True, isin=["în vigoare", "abrogat", "suspendat"])
+    status: str = pa.Field(nullable=True, isin=["in_force", "repealed", "suspended"])
     link: str
     synced_at: datetime
 

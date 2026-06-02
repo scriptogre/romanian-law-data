@@ -89,6 +89,9 @@ jobs:
           path: data/raw_documents
           merge-multiple: true
 
+      - name: Download relationships cache (for the status column)
+        run: gh release download relationships --pattern 'raw_relationships.parquet' --dir data || echo "no relationships cache yet (status will be NULL)"
+
       - name: Transform → Load (parquet + Pandera validation + FTS)
         run: uv run python -m etl.transform
 
