@@ -1,4 +1,4 @@
-.# Romanian Law Data (Parquet)
+# Romanian Law Data
 
 Zstd-compressed Parquet exports of the Romanian legal corpus (acts, articles, paragraphs) for use with [DuckDB](https://duckdb.org/). Sourced from [legislatie.just.ro](https://legislatie.just.ro/) (Ministry of Justice) via its public SOAP API.
 
