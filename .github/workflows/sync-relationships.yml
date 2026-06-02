@@ -1,15 +1,15 @@
-name: sync-web
+name: sync-relationships
 
-# Builds/refreshes the durable web-endpoint cache (a release asset) via
-# `etl/extracts/web.py`. legislatie.just.ro throttles per IP (a few hundred acts
-# fast, then ~1 req/s), so one runner can't do it. The work is SHARDED across N
-# runners (= N IPs): each fetches ids[shard::N] into a shard parquet; the merge
-# job folds shards into the cache and publishes. Resumable: each round fetches
-# only still-uncached acts, so re-dispatch until merge logs REMAINING=0.
+# Builds/refreshes the durable relationships cache (a release asset) via
+# `etl/extracts/relationships.py`. legislatie.just.ro throttles per IP (a few
+# hundred acts fast, then ~1 req/s), so one runner can't do it. The work is
+# SHARDED across N runners (= N IPs): each fetches ids[shard::N] into a shard
+# parquet; the publish job folds shards into the cache and uploads it. Resumable:
+# each round fetches only still-uncached acts, so re-dispatch until REMAINING=0.
 #
-# Backfill: dispatch mode=backfill (raise `shards`). Nightly: delta (small).
+# Backfill: dispatch mode=backfill. Nightly: delta (new + reconcile).
 # TODO downstream (needs parsers + cache wired into transform):
-#   suferite_html -> status / in_force_until; induse_html -> relationships.
+#   affected_by_html -> status / in_force_until; affects_html -> relationship edges.
 
 on:
   schedule:
@@ -30,7 +30,7 @@ permissions:
 
 env:
   SHARDS: ${{ inputs.shards || '16' }}
-  ETL_ACTIUNI_MODE: ${{ inputs.mode || 'delta' }}
+  ETL_RELATIONSHIPS_MODE: ${{ inputs.mode || 'delta' }}
   GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
 jobs:
@@ -42,7 +42,7 @@ jobs:
       - id: gen
         run: echo "matrix=$(seq 0 $((SHARDS - 1)) | jq -R . | jq -cs .)" >> "$GITHUB_OUTPUT"
 
-  fetch:
+  extract:
     needs: prepare
     runs-on: ubuntu-latest
     timeout-minutes: 350
@@ -51,8 +51,8 @@ jobs:
       matrix:
         shard: ${{ fromJSON(needs.prepare.outputs.matrix) }}
     env:
-      ETL_ACTIUNI_SHARD: ${{ matrix.shard }}
-      ETL_ACTIUNI_SHARDS: ${{ inputs.shards || '16' }}
+      ETL_RELATIONSHIPS_SHARD: ${{ matrix.shard }}
+      ETL_RELATIONSHIPS_SHARDS: ${{ inputs.shards || '16' }}
     steps:
       - uses: actions/checkout@v6
       - uses: astral-sh/setup-uv@v8.1.0
@@ -65,22 +65,22 @@ jobs:
           mkdir -p data
           LATEST=$(gh release list --json tagName --jq '[.[] | select(.tagName | startswith("laws/"))][0].tagName')
           gh release download "$LATEST" --pattern 'acte.parquet' --dir data
-          gh release download web-cache --pattern 'actiuni_cache.parquet' --dir data || echo "no cache yet"
-      - name: Fetch shard
-        run: uv run python -m etl.extract actiuni
+          gh release download relationships --pattern 'raw_relationships.parquet' --dir data || echo "no cache yet"
+      - name: Extract shard
+        run: uv run python -m etl.extract relationships
       - uses: actions/upload-artifact@v7
         if: always()
         with:
-          name: actiuni-shard-${{ matrix.shard }}
-          path: data/actiuni_shard_*.parquet
+          name: relationships-shard-${{ matrix.shard }}
+          path: data/relationships_shard_*.parquet
           if-no-files-found: ignore
 
-  merge:
-    needs: fetch
+  publish:
+    needs: extract
     if: always()
     runs-on: ubuntu-latest
     env:
-      ETL_ACTIUNI_RELEASE_TAG: web-cache
+      ETL_RELATIONSHIPS_RELEASE_TAG: relationships
     steps:
       - uses: actions/checkout@v6
       - uses: astral-sh/setup-uv@v8.1.0
@@ -93,11 +93,11 @@ jobs:
           mkdir -p data
           LATEST=$(gh release list --json tagName --jq '[.[] | select(.tagName | startswith("laws/"))][0].tagName')
           gh release download "$LATEST" --pattern 'acte.parquet' --dir data
-          gh release download web-cache --pattern 'actiuni_cache.parquet' --dir data || echo "first round, no cache"
+          gh release download relationships --pattern 'raw_relationships.parquet' --dir data || echo "first round, no cache"
       - uses: actions/download-artifact@v6
         with:
-          pattern: actiuni-shard-*
+          pattern: relationships-shard-*
           path: data
           merge-multiple: true
       - name: Merge shards -> cache + publish
-        run: uv run python -m etl.extract actiuni-merge
+        run: uv run python -m etl.extract relationships-merge

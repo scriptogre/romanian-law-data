@@ -1,7 +1,7 @@
 """
 Stage 2+3 — transform.py
 
-Orchestrator for everything after extract. Reads `data/raw_acts.jsonl`,
+Orchestrator for everything after extract. Reads `data/raw_documents/*.parquet`,
 runs the Polars cleanup pipeline, parses each cleaned act into articles +
 paragraphs, writes the three parquets via load.py, validates them with
 Pandera, and builds the FTS index.
@@ -12,7 +12,7 @@ encode/decode the two-process design needed.
 
 Pipeline:
 
-    scan_ndjson(raw_acts.jsonl)
+    scan_parquet(raw_documents/*.parquet)
         ↓
     cleanup (Polars LazyFrame: cedilla, BOM, whitespace, issuer recovery,
              3 date extractions, dedup) — runs on all cores via Rust/Rayon
@@ -49,11 +49,11 @@ from etl.transforms.quality import (
 )
 
 REPO_ROOT = Path(__file__).parent.parent
-INPUT_PATH = REPO_ROOT / "data" / "raw_acts.jsonl"
+INPUT_DIR = REPO_ROOT / "data" / "raw_documents"
 REPORT_PATH = REPO_ROOT / "data" / "parse_report.jsonl"
 
 MIN_ARTICLES_FOR_CLEAN_PARSE = 1
-PARSE_WORKERS = int(os.environ.get("ETL_PARSE_WORKERS", max(1, (os.cpu_count() or 4))))
+PARSE_WORKERS = int(os.environ.get("ETL_TRANSFORM_WORKERS", max(1, (os.cpu_count() or 4))))
 PARSE_CHUNKSIZE = 100
 
 
@@ -166,10 +166,10 @@ def _parsed_records(
 
 
 def main() -> None:
-    logger.info(f"pipeline: start (input={INPUT_PATH.name})")
+    logger.info(f"pipeline: start (input={INPUT_DIR.name}/)")
     REPORT_PATH.parent.mkdir(parents=True, exist_ok=True)
 
-    lf = pl.scan_ndjson(INPUT_PATH)
+    lf = pl.scan_parquet(INPUT_DIR / "*.parquet")
     df = cleanup(lf).collect(engine="streaming")
     n_unique = df.height
     logger.info(f"cleanup: done — {n_unique} unique acts (post-dedup)")

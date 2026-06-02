@@ -58,12 +58,12 @@ def derive_status(suferite_html: str | None) -> str | None:
 
 
 def add_status(lf: pl.LazyFrame) -> pl.LazyFrame:
-    """Add the `Status` column, then drop the raw action HTML.
+    """Add the `Status` column from an act's incoming relationships.
 
-    Status is computed here, in the main process, so the heavy HTML blobs
-    (a code's action list can top 200 KB) never get pickled out to the parse
-    workers or written to the final parquet. `actiuni_induse` is dropped too:
-    relatii parsing re-reads it straight from raw_acts.jsonl when needed.
+    Those relationships now live in the separate relationships cache
+    (extracts/relationships.py), no longer inline in the raw documents, so this
+    yields NULL until that cache is wired into the pipeline. The inline path
+    below stays as the template for that wiring.
     """
     present = set(lf.collect_schema().names())
     if "actiuni_suferite" not in present:

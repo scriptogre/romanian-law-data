@@ -1,68 +1,67 @@
-name: sync-soap
+name: sync-documents
+
+# Builds the legal corpus release. The SOAP fetch is SHARDED across N runners
+# (= N IPs); the endpoint scales per IP, so this turns a ~2h single-runner walk
+# into ~10min. Each shard writes parquet parts into data/raw_documents/; the
+# publish job gathers them, transforms, validates, and publishes the release.
+# publish only runs if ALL shards succeed (a partial corpus must not publish).
 
 on:
   schedule:
     - cron: "0 3 * * *"
   workflow_dispatch:
     inputs:
-      max_acts:
-        description: "Cap total acts (for smoke runs). Leave empty for full sync."
-        required: false
-        type: string
+      shards:
+        description: "Parallel runners (= IPs)."
+        default: "16"
+      limit:
+        description: "Cap acts per shard (smoke runs). Empty = full."
+        default: ""
 
 permissions:
   contents: write
 
-# Two jobs so a Transform/validate/test/publish failure does NOT throw away
-# Extract's two-hour SOAP sweep. If transform_publish fails, `gh run rerun
-# --failed` re-runs only that job — the cached raw_acts.jsonl artifact is
-# re-downloaded and the iteration costs ~5 min instead of ~2 h.
+env:
+  SHARDS: ${{ inputs.shards || '16' }}
+  GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
 jobs:
-  extract:
+  prepare:
     runs-on: ubuntu-latest
-    timeout-minutes: 240
-    env:
-      ETL_MAX_ACTS: ${{ inputs.max_acts }}
-      ETL_CONCURRENCY: "20"
-      # Skip per-act actiuni HTML here; that source is fetched separately by the
-      # sync-web workflow (etl/extracts/web.py) into its own cache, on its own
-      # cadence. Builds from this workflow have a NULL status column until the
-      # cache is wired into transform.
-      ETL_FETCH_ACTIUNI: "false"
+    outputs:
+      matrix: ${{ steps.gen.outputs.matrix }}
     steps:
-      - name: Free disk space
-        uses: jlumbroso/free-disk-space@main
-        with:
-          android: true
-          dotnet: true
-          haskell: true
-          large-packages: true
-          swap-storage: false
+      - id: gen
+        run: echo "matrix=$(seq 0 $((SHARDS - 1)) | jq -R . | jq -cs .)" >> "$GITHUB_OUTPUT"
 
+  extract:
+    needs: prepare
+    runs-on: ubuntu-latest
+    timeout-minutes: 350
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: ${{ fromJSON(needs.prepare.outputs.matrix) }}
+    env:
+      ETL_DOCUMENTS_SHARD: ${{ matrix.shard }}
+      ETL_DOCUMENTS_SHARDS: ${{ inputs.shards || '16' }}
+      ETL_DOCUMENTS_LIMIT: ${{ inputs.limit }}
+    steps:
       - uses: actions/checkout@v6
-
       - uses: astral-sh/setup-uv@v8.1.0
         with:
           enable-cache: true
-
-      - name: Setup Python
-        run: uv python install 3.12
-
-      - name: Install deps
-        run: uv sync
-
-      - name: Extract
-        run: uv run python -m etl.extract
-
-      - name: Upload raw_acts.jsonl
-        uses: actions/upload-artifact@v7
+      - run: uv python install 3.12
+      - run: uv sync
+      - name: Extract shard
+        run: uv run python -m etl.extract documents
+      - uses: actions/upload-artifact@v7
         with:
-          name: raw-acts
-          path: data/raw_acts.jsonl
-          retention-days: 7
-          compression-level: 9
+          name: raw-documents-${{ matrix.shard }}
+          path: data/raw_documents/*.parquet
+          if-no-files-found: ignore
 
-  transform_publish:
+  publish:
     needs: extract
     runs-on: ubuntu-latest
     timeout-minutes: 120
@@ -77,22 +76,18 @@ jobs:
           swap-storage: false
 
       - uses: actions/checkout@v6
-
       - uses: astral-sh/setup-uv@v8.1.0
         with:
           enable-cache: true
+      - run: uv python install 3.12
+      - run: uv sync
 
-      - name: Setup Python
-        run: uv python install 3.12
-
-      - name: Install deps
-        run: uv sync
-
-      - name: Download raw_acts.jsonl
+      - name: Gather raw_documents parts from all shards
         uses: actions/download-artifact@v6
         with:
-          name: raw-acts
-          path: data/
+          pattern: raw-documents-*
+          path: data/raw_documents
+          merge-multiple: true
 
       - name: Transform → Load (parquet + Pandera validation + FTS)
         run: uv run python -m etl.transform
@@ -111,8 +106,6 @@ jobs:
 
       - name: Check whether manifest changed vs latest release
         id: digest_check
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           LATEST_URL=$(gh release view --json assets --jq '.assets[] | select(.name=="laws.sha256") | .url' 2>/dev/null || true)
           if [ -n "$LATEST_URL" ]; then
@@ -144,12 +137,9 @@ jobs:
 
       - name: Publish release
         if: steps.digest_check.outputs.unchanged != 'true'
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           TAG="${{ steps.prep.outputs.tag }}"
           gh release delete "$TAG" --yes 2>/dev/null || true
-          git tag -d "$TAG" 2>/dev/null || true
           git push origin ":refs/tags/$TAG" 2>/dev/null || true
 
           cd data
@@ -159,18 +149,9 @@ jobs:
             --notes "$(cat <<EOF
           Romanian legal corpus snapshot.
 
-          **Last published act:** ${{ steps.stats.outputs.latest }}
+          Last published act: ${{ steps.stats.outputs.latest }}
 
-          ### Counts
-          - ${{ steps.stats.outputs.acte }} acte
-          - ${{ steps.stats.outputs.articole }} articole
-          - ${{ steps.stats.outputs.alineate }} alineate
-
-          ### Assets
-          - \`acte.parquet\` / \`articole.parquet\` / \`alineate.parquet\` — zstd-compressed Parquet
-          - \`fts.duckdb.zst\` — BM25 index (Romanian Snowball stemmer); consumer decompresses to \`fts.duckdb\`
-          - \`create_views.sql\` — DuckDB view definitions matching the data shape
-          - \`laws.sha256\` — \`sha256sum\`-compatible manifest
+          Counts: ${{ steps.stats.outputs.acte }} acte, ${{ steps.stats.outputs.articole }} articole, ${{ steps.stats.outputs.alineate }} alineate
           EOF
           )"
 
