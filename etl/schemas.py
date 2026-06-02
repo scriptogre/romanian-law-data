@@ -17,6 +17,8 @@ import pandera.polars as pa
 import polars as pl
 from loguru import logger
 
+from etl.transforms.relationships import KINDS
+
 
 # `content` is intentionally omitted from every schema. The PyArrow writer
 # already enforces `string` dtype on write, so the only thing Pandera would add
@@ -53,6 +55,22 @@ class Paragraphs(pa.DataFrameModel):
     article_id: int = pa.Field(ge=1)
     paragraph_number: int = pa.Field(nullable=True)
     paragraph_citation: str
+
+
+class Relationships(pa.DataFrameModel):
+    source_document_id: str
+    target_document_id: str
+    kind: str = pa.Field(isin=KINDS)
+    partial: bool
+    scope: str
+    target_citation: str = pa.Field(nullable=True)
+
+
+def validate_relationships(path: Path) -> None:
+    """Validate the relationships edges parquet. No FK: targets can be uncorpused."""
+    df = pl.read_parquet(path)
+    Relationships.validate(df, lazy=True)
+    logger.success(f"schemas: relationships OK — {df.height} edges")
 
 
 def check_referential_integrity(

@@ -39,8 +39,8 @@ import polars as pl
 from loguru import logger
 
 from etl.load import build_fts_index, write_combined_sha256, write_parquets
-from etl.schemas import validate_parquets
-from etl.transforms import dates, dedup, issuers, status, text
+from etl.schemas import validate_parquets, validate_relationships
+from etl.transforms import dates, dedup, issuers, relationships, status, text
 from etl.transforms.parse import extract_articles, extract_paragraphs
 from etl.transforms.quality import (
     HIGH_QUALITY,
@@ -220,11 +220,18 @@ def main() -> None:
     # 4. Build FTS index over articole.
     build_fts_index()
 
-    # 5. SHA256 manifest of the 3 parquets.
+    # 5. Relationship edges from the cached affects_html (no FK; targets can be
+    #    outside the corpus). Skipped if the relationships cache isn't present.
+    n_edges = relationships.build_relationships()
+    if n_edges:
+        validate_relationships(relationships.OUT_PATH)
+
+    # 6. SHA256 manifest of the 3 parquets.
     digest = write_combined_sha256()
     logger.info(f"  sha256: {digest}")
     logger.success(
-        f"pipeline: DONE — {n_acts} acte / {n_articles} articole / {n_paragraphs} alineate + FTS"
+        f"pipeline: DONE — {n_acts} acte / {n_articles} articole / {n_paragraphs} alineate "
+        f"/ {n_edges} relationships + FTS"
     )
 
 
