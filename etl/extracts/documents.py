@@ -57,9 +57,19 @@ def _env_int(name: str, default: int) -> int:
 CONCURRENCY = _env_int("ETL_DOCUMENTS_CONCURRENCY", 8)
 CHUNK = _env_int("ETL_DOCUMENTS_CHUNK", 5000)
 MIN_ID = _env_int("ETL_DOCUMENTS_MIN_ID", 1)
-# Highest id observed on the portal is ~311k; sweep a margin above it. Dead ids
-# past the real end are cheap (one 500, no retry). Raise via env as the corpus grows.
-MAX_ID = _env_int("ETL_DOCUMENTS_MAX_ID", 320000)
+# Top of the id sweep = the newest document id on the portal. Discovered at run time
+# (see discover_max_id); the env var pins it for one run, the constant is only a
+# last-resort fallback if probing fails.
+MAX_ID_FALLBACK = 320000
+# How the probe finds the newest id: the corpus is dense at the top (consecutive ids,
+# gaps of 0-1) and hard-dead above the newest act, so a run of END_OF_CORPUS_DEAD_RUN
+# consecutive dead ids reliably means we've passed the end. Walk up from PROBE_START_ID,
+# then sweep SWEEP_MARGIN past the newest act so acts published mid-run are still caught.
+# PROBE_ABORT_ID is a runaway guard.
+PROBE_START_ID = 1024
+END_OF_CORPUS_DEAD_RUN = 64
+SWEEP_MARGIN = 1000
+PROBE_ABORT_ID = 5_000_000
 CONNECT_TIMEOUT = 5
 READ_TIMEOUT = 30
 RETRY_PASSES = 4
@@ -239,6 +249,71 @@ async def fetch_chunk(session: requests.Session, ids: list[int]) -> list[tuple]:
     return [acts[i] for i in sorted(acts)]
 
 
+def _is_live(session: requests.Session, document_id: int) -> bool | None:
+    """True = a real act here, False = dead id (the portal's 500), None = transient (retry)."""
+    try:
+        response = session.get(
+            f"{BASE}/DetaliiDocument/{document_id}", timeout=(CONNECT_TIMEOUT, READ_TIMEOUT)
+        )
+    except Exception:
+        return None
+    if response.status_code == 200:
+        return 'class="S_DEN"' in response.text
+    if response.status_code == 500:  # the portal's "no act at this id" signal
+        return False
+    return None  # 429 / 503 / anything else -> transient
+
+
+def _has_live_act_in(session: requests.Session, start: int, count: int) -> bool:
+    """True if any id in [start, start+count) is a real act. A persistently transient id
+    counts as live, so throttling can never fake the end of the corpus (we'd rather
+    overshoot the newest id and sweep some cheap dead ids than stop short and lose acts)."""
+    for document_id in range(start, start + count):
+        live = _is_live(session, document_id)
+        for _ in range(SOFT_RETRIES):
+            if live is not None:
+                break
+            time.sleep(THROTTLE_BACKOFF)
+            live = _is_live(session, document_id)
+        if live is None or live:  # a real act, or gave up while throttled -> treat as live
+            return True
+    return False
+
+
+def discover_max_id(session: requests.Session) -> int:
+    """Find the newest document id on the portal and return it plus a margin, with no
+    hardcoded ceiling. This is the top of the id sweep.
+
+    Walk up from PROBE_START_ID, doubling, until a run of END_OF_CORPUS_DEAD_RUN dead ids
+    shows we've passed the newest act; binary-search the exact end; add SWEEP_MARGIN so
+    acts published mid-run are still caught. Falls back to MAX_ID_FALLBACK only if the
+    probe runs away past PROBE_ABORT_ID.
+    """
+    last_live, first_dead = PROBE_START_ID, PROBE_START_ID
+    while _has_live_act_in(session, first_dead, END_OF_CORPUS_DEAD_RUN):
+        last_live, first_dead = first_dead, first_dead * 2
+        if first_dead > PROBE_ABORT_ID:
+            logger.warning(f"id probe exceeded {PROBE_ABORT_ID}; using fallback {MAX_ID_FALLBACK}")
+            return MAX_ID_FALLBACK
+
+    while first_dead - last_live > 1:
+        mid = (last_live + first_dead) // 2
+        if _has_live_act_in(session, mid, END_OF_CORPUS_DEAD_RUN):
+            last_live = mid
+        else:
+            first_dead = mid
+
+    max_id = last_live + END_OF_CORPUS_DEAD_RUN + SWEEP_MARGIN
+    logger.success(f"newest document id is near {last_live}; sweeping through {max_id}")
+    return max_id
+
+
+def print_max_id() -> None:
+    """CLI entry (stage `documents-max-id`): print the discovered newest id to stdout so
+    the prepare job can hand one ETL_DOCUMENTS_MAX_ID to every shard. Logs go to stderr."""
+    print(discover_max_id(_session()))
+
+
 def run() -> None:
     """Sweep this shard's id stride, fetching detail pages in chunks into parquet parts."""
     concurrency = CONCURRENCY
@@ -247,18 +322,24 @@ def run() -> None:
     limit_raw = os.environ.get("ETL_DOCUMENTS_LIMIT")
     limit = int(limit_raw) if limit_raw else None
 
+    session = _session()
+
+    # Ceiling: pinned by env (the prepare job discovers it once and hands it to every
+    # shard), else discover it here so a standalone local run still sweeps the whole corpus.
+    max_id_env = os.environ.get("ETL_DOCUMENTS_MAX_ID")
+    max_id = int(max_id_env) if max_id_env else discover_max_id(session)
+
     schema = {field: pl.Utf8 for field in SOAP_FIELDS}
-    ids = list(range(MIN_ID + shard, MAX_ID + 1, shards))
+    ids = list(range(MIN_ID + shard, max_id + 1, shards))
     if limit is not None:
         ids = ids[:limit]
 
     RAW_DIR.mkdir(parents=True, exist_ok=True)
     logger.info(
-        f"documents: shard {shard}/{shards}, ids {MIN_ID}..{MAX_ID} (stride {shards}, "
+        f"documents: shard {shard}/{shards}, ids {MIN_ID}..{max_id} (stride {shards}, "
         f"{len(ids)} this shard), concurrency {concurrency}"
     )
 
-    session = _session()
     total = 0
     for offset in range(0, len(ids), CHUNK):
         chunk = ids[offset : offset + CHUNK]

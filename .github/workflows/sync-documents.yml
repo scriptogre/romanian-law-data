@@ -20,7 +20,7 @@ on:
         description: "Cap ids per shard (smoke runs). Empty = full."
         default: ""
       max_id:
-        description: "Top of the id sweep. Empty = code default (320000). Raise as the portal grows."
+        description: "Pin the top of the id sweep. Empty = auto-discover the newest id (default)."
         default: ""
       release_tag:
         description: "Publish to this tag instead of laws/<date> (e.g. smoke/2026-06-03)."
@@ -38,9 +38,28 @@ jobs:
     runs-on: ubuntu-latest
     outputs:
       matrix: ${{ steps.gen.outputs.matrix }}
+      max_id: ${{ steps.max_id.outputs.max_id }}
     steps:
       - id: gen
         run: echo "matrix=$(seq 0 $((SHARDS - 1)) | jq -R . | jq -cs .)" >> "$GITHUB_OUTPUT"
+      - uses: actions/checkout@v6
+      - uses: astral-sh/setup-uv@v8.1.0
+        with:
+          enable-cache: true
+      - run: uv python install 3.12
+      - run: uv sync
+      - name: Discover newest document id (one probe, shared by every shard)
+        id: max_id
+        run: |
+          # Honour a pinned max_id input; otherwise probe the portal for the newest act id.
+          if [ -n "${{ inputs.max_id }}" ]; then
+            MAX_ID="${{ inputs.max_id }}"
+            echo "max_id pinned by input: $MAX_ID"
+          else
+            MAX_ID=$(uv run python -m etl.extract documents-max-id | tail -n1)
+            echo "max_id discovered: $MAX_ID"
+          fi
+          echo "max_id=$MAX_ID" >> "$GITHUB_OUTPUT"
 
   extract:
     needs: prepare
@@ -54,7 +73,7 @@ jobs:
       ETL_DOCUMENTS_SHARD: ${{ matrix.shard }}
       ETL_DOCUMENTS_SHARDS: ${{ inputs.shards || '16' }}
       ETL_DOCUMENTS_LIMIT: ${{ inputs.limit }}
-      ETL_DOCUMENTS_MAX_ID: ${{ inputs.max_id }}
+      ETL_DOCUMENTS_MAX_ID: ${{ needs.prepare.outputs.max_id }}
     steps:
       - uses: actions/checkout@v6
       - uses: astral-sh/setup-uv@v8.1.0
