@@ -1,0 +1,215 @@
+name: citation-symmetry
+
+# One-off validation: is the citation graph symmetric, so deriving incoming
+# citations as the inverse of outgoing (referaPe) loses nothing?
+#
+# We KEEP outgoing citations and DERIVE incoming. The lossy failure mode is an
+# incoming citation (referitDe says X cites A) with NO matching outgoing entry
+# (A not in X's referaPe). Per sampled act A: fetch referitDe(A) -> citers X; for
+# each X fetch referaPe(X); check A in out(X). A near-zero miss rate means
+# outgoing-only is safe. Sharded across runners (= IPs) to beat the per-IP throttle.
+
+on:
+  workflow_dispatch:
+    inputs:
+      sample:
+        description: "How many acts to sample."
+        default: "1000"
+      shards:
+        description: "Parallel runners (= IPs)."
+        default: "16"
+      seed:
+        description: "RNG seed for the sample."
+        default: "7"
+      k:
+        description: "Max citers checked per act (bounds hub acts)."
+        default: "30"
+
+permissions:
+  contents: read
+
+env:
+  SHARDS: ${{ inputs.shards || '16' }}
+  GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+jobs:
+  prepare:
+    runs-on: ubuntu-latest
+    outputs:
+      matrix: ${{ steps.gen.outputs.matrix }}
+    steps:
+      - uses: actions/checkout@v6
+      - uses: astral-sh/setup-uv@v8.1.0
+        with:
+          enable-cache: true
+      - run: uv python install 3.12
+      - run: uv sync
+      - name: Sample act ids from the latest corpus
+        run: |
+          mkdir -p data
+          LATEST=$(gh release list --json tagName --jq '[.[] | select(.tagName | startswith("laws/"))][0].tagName')
+          gh release download "$LATEST" --pattern 'acte.parquet' --dir data
+          SAMPLE="${{ inputs.sample || '1000' }}" SEED="${{ inputs.seed || '7' }}" uv run python - <<'EOF'
+          import os, random
+          import polars as pl
+          ids = pl.read_parquet("data/acte.parquet")["link"].str.extract(r"(\d+)\s*$", 1).drop_nulls().to_list()
+          random.seed(int(os.environ["SEED"]))
+          sample = random.sample(ids, int(os.environ["SAMPLE"]))
+          with open("data/symmetry_ids.txt", "w") as f:
+              f.write("\n".join(sample))
+          print(f"sampled {len(sample)} of {len(ids)} acts")
+          EOF
+      - uses: actions/upload-artifact@v7
+        with:
+          name: symmetry-ids
+          path: data/symmetry_ids.txt
+      - id: gen
+        run: echo "matrix=$(seq 0 $((SHARDS - 1)) | jq -R . | jq -cs .)" >> "$GITHUB_OUTPUT"
+
+  fetch:
+    needs: prepare
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: ${{ fromJSON(needs.prepare.outputs.matrix) }}
+    env:
+      SHARD: ${{ matrix.shard }}
+      K: ${{ inputs.k || '30' }}
+    steps:
+      - uses: actions/checkout@v6
+      - uses: astral-sh/setup-uv@v8.1.0
+        with:
+          enable-cache: true
+      - run: uv python install 3.12
+      - run: uv sync
+      - uses: actions/download-artifact@v6
+        with:
+          name: symmetry-ids
+          path: data
+      - name: Check this shard's slice
+        run: |
+          uv run python - <<'EOF'
+          import os, re, time, random
+          import polars as pl
+          import requests
+
+          BASE = "https://legislatie.just.ro/Public"
+          UA = ("Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 "
+                "(KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36")
+          shard = int(os.environ["SHARD"])
+          shards = int(os.environ["SHARDS"])
+          k = int(os.environ["K"])
+
+          ids = [x.strip() for x in open("data/symmetry_ids.txt") if x.strip()]
+          mine = ids[shard::shards]
+          random.seed(1000 + shard)
+
+          s = requests.Session()
+          s.headers["User-Agent"] = UA
+
+          def post(endpoint, cid):
+              for _ in range(2):
+                  try:
+                      r = s.post(f"{BASE}/{endpoint}", data={"contor": cid}, timeout=(5, 30))
+                      if r.status_code == 200:
+                          return (r.json() or {}).get("acte", "") or ""
+                  except Exception:
+                      pass
+                  time.sleep(1)
+              return None
+
+          def parse(html, self_id):
+              if html is None:
+                  return None
+              found = set(re.findall(r"DetaliiDocument/(\d+)", html))
+              found.discard(str(self_id))
+              return found
+
+          out_cache = {}
+          def out_of(x):
+              if x not in out_cache:
+                  out_cache[x] = parse(post("referaPe", x), x)
+              return out_cache[x]
+
+          rows = []
+          for a in mine:
+              inc = parse(post("referitDe", a), a)
+              if not inc:
+                  continue
+              citers = sorted(inc)
+              if len(citers) > k:
+                  citers = random.sample(citers, k)
+              for x in citers:
+                  ox = out_of(x)
+                  rows.append({
+                      "act_id": a,
+                      "citer_id": x,
+                      "found_in_outgoing": None if ox is None else (str(a) in ox),
+                  })
+
+          schema = {"act_id": pl.Utf8, "citer_id": pl.Utf8, "found_in_outgoing": pl.Boolean}
+          pl.DataFrame(rows, schema=schema).write_parquet(f"data/symmetry_shard_{shard}.parquet")
+          print(f"shard {shard}: {len(mine)} acts, {len(rows)} incoming edges checked")
+          EOF
+      - uses: actions/upload-artifact@v7
+        with:
+          name: symmetry-shard-${{ matrix.shard }}
+          path: data/symmetry_shard_*.parquet
+          if-no-files-found: ignore
+
+  report:
+    needs: fetch
+    if: always()
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - uses: astral-sh/setup-uv@v8.1.0
+        with:
+          enable-cache: true
+      - run: uv python install 3.12
+      - run: uv sync
+      - uses: actions/download-artifact@v6
+        with:
+          pattern: symmetry-shard-*
+          path: data
+          merge-multiple: true
+      - name: Aggregate
+        run: |
+          uv run python - <<'EOF' | tee -a "$GITHUB_STEP_SUMMARY"
+          import glob
+          import polars as pl
+
+          files = glob.glob("data/symmetry_shard_*.parquet")
+          if not files:
+              print("## citation-symmetry\n\nNo shard data.")
+              raise SystemExit(0)
+
+          df = pl.concat([pl.read_parquet(f) for f in files])
+          checked = df.filter(pl.col("found_in_outgoing").is_not_null())
+          n = checked.height
+          misses = checked.filter(~pl.col("found_in_outgoing"))
+          miss_n = misses.height
+          unfetched = df.height - n
+          rate = (100 * miss_n / n) if n else 0.0
+
+          print("## citation-symmetry")
+          print()
+          print(f"- acts with >=1 incoming citation: **{df['act_id'].n_unique()}**")
+          print(f"- incoming edges checked: **{n}**")
+          print(f"- citer pages that failed to fetch (excluded): {unfetched}")
+          print(f"- **misses** (incoming edge with NO matching outgoing): **{miss_n}**  ({rate:.3f}%)")
+          print()
+          if miss_n == 0:
+              print("All incoming citations have a matching outgoing entry -> outgoing-only loses nothing on this sample.")
+          else:
+              print("Examples of misses (act_id <- citer_id where citer's referaPe omits act):")
+              for r in misses.head(15).to_dicts():
+                  print(f"  - {r['act_id']} <- {r['citer_id']}")
+          EOF
+      - uses: actions/upload-artifact@v7
+        with:
+          name: symmetry-edges
+          path: data/symmetry_shard_*.parquet
+          if-no-files-found: ignore
