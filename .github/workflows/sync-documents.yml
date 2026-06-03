@@ -1,10 +1,12 @@
 name: sync-documents
 
-# Builds the legal corpus release. The SOAP fetch is SHARDED across N runners
-# (= N IPs); the endpoint scales per IP, so this turns a ~2h single-runner walk
-# into ~10min. Each shard writes parquet parts into data/raw_documents/; the
-# publish job gathers them, transforms, validates, and publishes the release.
-# publish only runs if ALL shards succeed (a partial corpus must not publish).
+# Builds the legal corpus release. The fetch sweeps the document-id space and
+# reads each act's /Public/DetaliiDocument/{id} page (the SOAP Search API has no
+# stable sort, so paginating it drops ~1/3 of acts; see extracts/documents.py).
+# SHARDED across N runners (= N IPs) by id stride; the site throttles per IP, so
+# N runners ~= Nx throughput. Each shard writes parquet parts into
+# data/raw_documents/; the publish job gathers them, transforms, validates, and
+# publishes. publish only runs if ALL shards succeed (a partial corpus must not publish).
 
 on:
   schedule:
@@ -15,7 +17,13 @@ on:
         description: "Parallel runners (= IPs)."
         default: "16"
       limit:
-        description: "Cap acts per shard (smoke runs). Empty = full."
+        description: "Cap ids per shard (smoke runs). Empty = full."
+        default: ""
+      max_id:
+        description: "Top of the id sweep. Empty = code default (320000). Raise as the portal grows."
+        default: ""
+      release_tag:
+        description: "Publish to this tag instead of laws/<date> (e.g. smoke/2026-06-03)."
         default: ""
 
 permissions:
@@ -46,6 +54,7 @@ jobs:
       ETL_DOCUMENTS_SHARD: ${{ matrix.shard }}
       ETL_DOCUMENTS_SHARDS: ${{ inputs.shards || '16' }}
       ETL_DOCUMENTS_LIMIT: ${{ inputs.limit }}
+      ETL_DOCUMENTS_MAX_ID: ${{ inputs.max_id }}
     steps:
       - uses: actions/checkout@v6
       - uses: astral-sh/setup-uv@v8.1.0
@@ -59,6 +68,11 @@ jobs:
         with:
           name: raw-documents-${{ matrix.shard }}
           path: data/raw_documents/*.parquet
+          if-no-files-found: ignore
+      - uses: actions/upload-artifact@v7
+        with:
+          name: raw-versions-${{ matrix.shard }}
+          path: data/raw_versions/*.parquet
           if-no-files-found: ignore
 
   publish:
@@ -89,6 +103,13 @@ jobs:
           path: data/raw_documents
           merge-multiple: true
 
+      - name: Gather raw_versions parts from all shards
+        uses: actions/download-artifact@v6
+        with:
+          pattern: raw-versions-*
+          path: data/raw_versions
+          merge-multiple: true
+
       - name: Download relationships cache (for the status column)
         run: gh release download relationships --pattern 'raw_relationships.parquet' --dir data || echo "no relationships cache yet (status will be NULL)"
 
@@ -102,14 +123,35 @@ jobs:
         id: prep
         run: |
           cp create_views.sql data/create_views.sql
+          # Concat raw shards into single assets (raw_versions may be empty -> empty file).
+          uv run python - <<'EOF'
+          import pathlib
+          import duckdb
+          import polars as pl
+          from etl.extracts import versions
+          con = duckdb.connect()
+          con.execute(
+              "COPY (SELECT * FROM read_parquet('data/raw_documents/*.parquet')) "
+              "TO 'data/raw_documents.parquet' (FORMAT parquet, COMPRESSION zstd)"
+          )
+          if list(pathlib.Path("data/raw_versions").glob("*.parquet")):
+              con.execute(
+                  "COPY (SELECT * FROM read_parquet('data/raw_versions/*.parquet')) "
+                  "TO 'data/raw_versions.parquet' (FORMAT parquet, COMPRESSION zstd)"
+              )
+          else:
+              pl.DataFrame(schema=versions.SCHEMA).write_parquet("data/raw_versions.parquet", compression="zstd")
+          EOF
           cd data
           zstd -3 -f --quiet --rm fts.duckdb -o fts.duckdb.zst
-          sha256sum acte.parquet articole.parquet alineate.parquet relationships.parquet fts.duckdb.zst create_views.sql > laws.sha256
-          echo "tag=laws/$(date -u +%Y-%m-%d)" >> "$GITHUB_OUTPUT"
+          sha256sum acte.parquet articole.parquet alineate.parquet relationships.parquet raw_documents.parquet raw_versions.parquet fts.duckdb.zst create_views.sql > laws.sha256
+          TAG="${{ inputs.release_tag }}"; [ -z "$TAG" ] && TAG="laws/$(date -u +%Y-%m-%d)"
+          echo "tag=$TAG" >> "$GITHUB_OUTPUT"
 
       - name: Check whether manifest changed vs latest release
         id: digest_check
         run: |
+          if [ -n "${{ inputs.release_tag }}" ]; then echo "unchanged=false" >> "$GITHUB_OUTPUT"; exit 0; fi
           LATEST_URL=$(gh release view --json assets --jq '.assets[] | select(.name=="laws.sha256") | .url' 2>/dev/null || true)
           if [ -n "$LATEST_URL" ]; then
             LATEST_MANIFEST=$(curl -sL "$LATEST_URL")
@@ -142,12 +184,13 @@ jobs:
         if: steps.digest_check.outputs.unchanged != 'true'
         run: |
           TAG="${{ steps.prep.outputs.tag }}"
+          PRERELEASE=""; [ -n "${{ inputs.release_tag }}" ] && PRERELEASE="--prerelease"
           gh release delete "$TAG" --yes 2>/dev/null || true
           git push origin ":refs/tags/$TAG" 2>/dev/null || true
 
           cd data
-          gh release create "$TAG" \
-            acte.parquet articole.parquet alineate.parquet relationships.parquet fts.duckdb.zst create_views.sql laws.sha256 \
+          gh release create "$TAG" $PRERELEASE \
+            acte.parquet articole.parquet alineate.parquet relationships.parquet raw_documents.parquet raw_versions.parquet fts.duckdb.zst create_views.sql laws.sha256 \
             --title "$TAG" \
             --notes "$(cat <<EOF
           Romanian legal corpus snapshot.

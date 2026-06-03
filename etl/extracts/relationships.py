@@ -1,17 +1,17 @@
 """
 Stage 1 (alt) — extracts/relationships.py
 
-Fetch each act's relationship graph from legislatie.just.ro's own web endpoints
-(`/Public/actiuniSuferite`, `/Public/actiuniInduse`), separate from the SOAP API
-in documents.py. For each act:
+Fetch each act's OUTGOING relationships from legislatie.just.ro's own web
+endpoints, separate from the SOAP API in documents.py. For each act:
 
-    affected_by  = acts that change THIS act (incoming): "repealed by ...", ...
-    affects      = acts that THIS act changes (outgoing): "repeals ...", ...
+    affects (actiuniInduse) = changes THIS act makes to others: "repeals ...", ...
+    cites   (referaPe)      = acts THIS act references
 
-Together that's a directed act-to-act graph; the document's status (in force /
-repealed) is derived from its incoming edges. Output: a durable cache parquet
-(document_id -> affected_by_html, affects_html, fetched_at) published as a
-release asset.
+We fetch only the outgoing side. The incoming side (who changes / cites this act)
+is the exact inverse and is derived in the transform layer, not fetched — verified
+symmetric (changes 100% across the whole corpus, citations 45/45 sampled). Output:
+a durable cache parquet (document_id -> affects_html, cites_html, fetched_at)
+published as a release asset.
 
 THROTTLE: the site runs a per-IP token bucket - a few hundred acts fetch fast,
 then that IP is choked to ~1 req/s. One IP cannot do the backfill. So the work
@@ -36,7 +36,7 @@ import asyncio
 import os
 import subprocess
 import time
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
 
 import polars as pl
@@ -44,7 +44,7 @@ import requests
 from loguru import logger
 from requests.adapters import HTTPAdapter
 
-ENDPOINTS = ("actiuniSuferite", "actiuniInduse")  # site endpoint names (incoming, outgoing)
+ENDPOINTS = ("actiuniInduse", "referaPe")  # outgoing: changes-made, citations-made
 BASE = "https://legislatie.just.ro/Public"
 UA = (
     "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 "
@@ -66,8 +66,8 @@ RELEASE_TAG = os.environ.get("ETL_RELATIONSHIPS_RELEASE_TAG")
 
 CACHE_SCHEMA = {
     "document_id": pl.Utf8,
-    "affected_by_html": pl.Utf8,
     "affects_html": pl.Utf8,
+    "cites_html": pl.Utf8,
     "fetched_at": pl.Datetime,
 }
 
@@ -75,7 +75,17 @@ CACHE_SCHEMA = {
 # --- cache -----------------------------------------------------------------
 
 def load_cache() -> pl.DataFrame:
-    return pl.read_parquet(CACHE_PATH) if CACHE_PATH.exists() else pl.DataFrame(schema=CACHE_SCHEMA)
+    """Load the cache, but only if it matches the current schema.
+
+    A schema change (e.g. swapping the incoming endpoint for citations) makes the
+    old cache incompatible; treat it as empty so the backfill rebuilds from scratch.
+    """
+    if not CACHE_PATH.exists():
+        return pl.DataFrame(schema=CACHE_SCHEMA)
+    cached = pl.read_parquet(CACHE_PATH)
+    if set(cached.columns) != set(CACHE_SCHEMA):
+        return pl.DataFrame(schema=CACHE_SCHEMA)
+    return cached.select(list(CACHE_SCHEMA))
 
 
 def merge_cache(base: pl.DataFrame, new_rows: list[dict]) -> pl.DataFrame:
@@ -132,9 +142,9 @@ async def _one_pass(session: requests.Session, ids: list[str]) -> dict[str, tupl
     async def one(document_id: str) -> None:
         nonlocal last_log
         async with sem:
-            affected_by = await asyncio.to_thread(_fetch, session, "actiuniSuferite", document_id)
             affects = await asyncio.to_thread(_fetch, session, "actiuniInduse", document_id)
-            result[document_id] = (affected_by, affects)
+            cites = await asyncio.to_thread(_fetch, session, "referaPe", document_id)
+            result[document_id] = (affects, cites)
 
             now = time.time()
             if now - last_log >= 15:
@@ -155,17 +165,17 @@ async def fetch(ids: list[str]) -> list[dict]:
     pending = ids
 
     for attempt in range(1, RETRY_PASSES + 1):
-        for document_id, (affected_by, affects) in (await _one_pass(session, pending)).items():
-            if affected_by is not None and affects is not None:
-                done[document_id] = (affected_by, affects)
+        for document_id, (affects, cites) in (await _one_pass(session, pending)).items():
+            if affects is not None and cites is not None:
+                done[document_id] = (affects, cites)
         pending = [a for a in pending if a not in done]
         logger.info(f"pass {attempt}: {len(done)}/{len(ids)} ok, {len(pending)} left")
         if not pending:
             break
 
-    now = datetime.now(timezone.utc)
+    now = datetime.now(UTC)
     return [
-        {"document_id": d, "affected_by_html": a, "affects_html": b, "fetched_at": now}
+        {"document_id": d, "affects_html": a, "cites_html": b, "fetched_at": now}
         for d, (a, b) in done.items()
     ]
 

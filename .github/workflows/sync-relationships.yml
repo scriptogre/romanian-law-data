@@ -24,6 +24,12 @@ on:
       shards:
         description: "Parallel runners (= IPs)."
         default: "16"
+      limit:
+        description: "Cap ids per shard (smoke runs). Empty = full."
+        default: ""
+      release_tag:
+        description: "Publish cache to this tag instead of `relationships`."
+        default: ""
 
 permissions:
   contents: write
@@ -53,6 +59,7 @@ jobs:
     env:
       ETL_RELATIONSHIPS_SHARD: ${{ matrix.shard }}
       ETL_RELATIONSHIPS_SHARDS: ${{ inputs.shards || '16' }}
+      ETL_RELATIONSHIPS_LIMIT: ${{ inputs.limit }}
     steps:
       - uses: actions/checkout@v6
       - uses: astral-sh/setup-uv@v8.1.0
@@ -80,7 +87,7 @@ jobs:
     if: always()
     runs-on: ubuntu-latest
     env:
-      ETL_RELATIONSHIPS_RELEASE_TAG: relationships
+      ETL_RELATIONSHIPS_RELEASE_TAG: ${{ inputs.release_tag || 'relationships' }}
     steps:
       - uses: actions/checkout@v6
       - uses: astral-sh/setup-uv@v8.1.0

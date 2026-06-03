@@ -99,20 +99,12 @@ A Constitutional Court ruling shows up as a `MODIFICĂ` edge from a `DECIZIE`. T
 
 ## Versions
 
-The act page HTML holds a block `istoric_fa`. It lists every consolidation date.
+The act page holds a block `istoric_fa`: one dated link per consolidation, newest first.
 
 ```
-22.04.2012   23.03.2012   10.07.2011   ...
+<a href="/Public/DetaliiDocument/304554">19.12.2025</a>   past form, GET it
+<a style="cursor:default">26.04.2026</a>                  current form, no link
 ```
 
-Two dates in a row = one version window. The older date is its `valid_from`. The next date is its `valid_until`.
-
-To fetch one version's text, POST to the **same** detail endpoint:
-
-```
-POST /Public/DetaliiDocument/38070
-body:  isFormaDeBaza=true
-reply: { "Url": "..." }     then follow Url
-```
-
-No new endpoint needed.
+Each link's id is a full act page. Fetch a past version like any other act:
+`GET /Public/DetaliiDocument/{id}`. A version is valid from its date to the next-newer one.

@@ -66,8 +66,12 @@ def add_status(lf: pl.LazyFrame) -> pl.LazyFrame:
     joined on the portal id in `LinkHtml`. Acts absent from the cache get NULL.
     If the cache isn't present at all (e.g. a build without it), every act is NULL.
     """
+    null_status = lf.with_columns(pl.lit(None, dtype=pl.Utf8).alias("Status"))
     if not CACHE_PATH.exists():
-        return lf.with_columns(pl.lit(None, dtype=pl.Utf8).alias("Status"))
+        return null_status
+    # outgoing-only cache has no affected_by_html; status derivation moves to layer 2
+    if "affected_by_html" not in pl.scan_parquet(CACHE_PATH).collect_schema().names():
+        return null_status
 
     status_map = (
         pl.read_parquet(CACHE_PATH, columns=["document_id", "affected_by_html"])
