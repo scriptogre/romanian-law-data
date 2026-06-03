@@ -59,7 +59,7 @@ CHUNK = int(os.environ.get("ETL_RELATIONSHIPS_CHUNK", 5000))
 
 REPO_ROOT = Path(__file__).parent.parent.parent
 DATA_DIR = REPO_ROOT / "data"
-CORPUS_PATH = DATA_DIR / "acte.parquet"  # document list (Romanian until the transform emits English)
+CORPUS_PATH = DATA_DIR / "documents.parquet"  # the document list the transform emits
 CACHE_PATH = DATA_DIR / "raw_relationships.parquet"
 RECONCILE_FRACTION = float(os.environ.get("ETL_RELATIONSHIPS_RECONCILE", 0.0333))  # ~1/30 -> ~monthly
 RELEASE_TAG = os.environ.get("ETL_RELATIONSHIPS_RELEASE_TAG")

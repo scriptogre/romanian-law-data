@@ -48,11 +48,11 @@ jobs:
         run: |
           mkdir -p data
           LATEST=$(gh release list --json tagName --jq '[.[] | select(.tagName | startswith("laws/"))][0].tagName')
-          gh release download "$LATEST" --pattern 'acte.parquet' --dir data
+          gh release download "$LATEST" --pattern 'documents.parquet' --dir data
           SAMPLE="${{ inputs.sample || '1000' }}" SEED="${{ inputs.seed || '7' }}" uv run python - <<'EOF'
           import os, random
           import polars as pl
-          ids = pl.read_parquet("data/acte.parquet")["link"].str.extract(r"(\d+)\s*$", 1).drop_nulls().to_list()
+          ids = pl.read_parquet("data/documents.parquet")["link"].str.extract(r"(\d+)\s*$", 1).drop_nulls().to_list()
           random.seed(int(os.environ["SEED"]))
           sample = random.sample(ids, int(os.environ["SAMPLE"]))
           with open("data/symmetry_ids.txt", "w") as f:

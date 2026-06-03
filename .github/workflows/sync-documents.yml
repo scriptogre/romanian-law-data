@@ -163,7 +163,7 @@ jobs:
           EOF
           cd data
           zstd -3 -f --quiet --rm fts.duckdb -o fts.duckdb.zst
-          sha256sum acte.parquet articole.parquet alineate.parquet relationships.parquet raw_documents.parquet raw_versions.parquet fts.duckdb.zst create_views.sql > laws.sha256
+          sha256sum documents.parquet articles.parquet paragraphs.parquet relationships.parquet raw_documents.parquet raw_versions.parquet fts.duckdb.zst create_views.sql > laws.sha256
           TAG="${{ inputs.release_tag }}"; [ -z "$TAG" ] && TAG="laws/$(date -u +%Y-%m-%d)"
           echo "tag=$TAG" >> "$GITHUB_OUTPUT"
 
@@ -190,12 +190,12 @@ jobs:
           c = duckdb.connect()
           row = c.execute('''
               SELECT
-                  (SELECT count(*) FROM read_parquet(\"data/acte.parquet\")) AS acte,
-                  (SELECT count(*) FROM read_parquet(\"data/articole.parquet\")) AS articole,
-                  (SELECT count(*) FROM read_parquet(\"data/alineate.parquet\")) AS alineate,
-                  (SELECT max(published_at) FROM read_parquet(\"data/acte.parquet\")) AS latest
+                  (SELECT count(*) FROM read_parquet(\"data/documents.parquet\")) AS documents,
+                  (SELECT count(*) FROM read_parquet(\"data/articles.parquet\")) AS articles,
+                  (SELECT count(*) FROM read_parquet(\"data/paragraphs.parquet\")) AS paragraphs,
+                  (SELECT max(published_at) FROM read_parquet(\"data/documents.parquet\")) AS latest
           ''').fetchone()
-          for k, v in zip(['acte', 'articole', 'alineate', 'latest'], row):
+          for k, v in zip(['documents', 'articles', 'paragraphs', 'latest'], row):
               print(f'{k}={v}')
           " >> "$GITHUB_OUTPUT"
 
@@ -209,14 +209,14 @@ jobs:
 
           cd data
           gh release create "$TAG" $PRERELEASE \
-            acte.parquet articole.parquet alineate.parquet relationships.parquet raw_documents.parquet raw_versions.parquet fts.duckdb.zst create_views.sql laws.sha256 \
+            documents.parquet articles.parquet paragraphs.parquet relationships.parquet raw_documents.parquet raw_versions.parquet fts.duckdb.zst create_views.sql laws.sha256 \
             --title "$TAG" \
             --notes "$(cat <<EOF
           Romanian legal corpus snapshot.
 
           Last published act: ${{ steps.stats.outputs.latest }}
 
-          Counts: ${{ steps.stats.outputs.acte }} acte, ${{ steps.stats.outputs.articole }} articole, ${{ steps.stats.outputs.alineate }} alineate
+          Counts: ${{ steps.stats.outputs.documents }} documents, ${{ steps.stats.outputs.articles }} articles, ${{ steps.stats.outputs.paragraphs }} paragraphs
           EOF
           )"
 

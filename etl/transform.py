@@ -60,8 +60,7 @@ PARSE_CHUNKSIZE = 100
 def cleanup(lf: pl.LazyFrame) -> pl.LazyFrame:
     """Apply every cleanup transform in order. The composition is the contract."""
     return (
-        lf
-        .pipe(text.normalize_nfc)
+        lf.pipe(text.normalize_nfc)
         .pipe(text.decode_html_entities)
         .pipe(text.fix_replacement_chars)
         .pipe(text.fix_cedilla)
@@ -105,7 +104,9 @@ def parse_act(cleaned: dict) -> dict:
     for article in articles:
         article["paragraphs"] = extract_paragraphs(article["full_path"], article["content"])
 
-    quality = compute_quality(text_body, articles if not is_fallback else [], is_fallback=is_fallback)
+    quality = compute_quality(
+        text_body, articles if not is_fallback else [], is_fallback=is_fallback
+    )
     return {"raw": cleaned, "articles": articles, "quality": quality}
 
 
@@ -182,22 +183,20 @@ def main() -> None:
         ProcessPoolExecutor(max_workers=PARSE_WORKERS) as pool,
         REPORT_PATH.open("w", encoding="utf-8") as report,
     ):
-        parsed_iter = pool.map(
-            parse_act, df.iter_rows(named=True), chunksize=PARSE_CHUNKSIZE
-        )
+        parsed_iter = pool.map(parse_act, df.iter_rows(named=True), chunksize=PARSE_CHUNKSIZE)
         n_acts, n_articles, n_paragraphs = write_parquets(
             _parsed_records(parsed_iter, report, bands, gates, scoresum)
         )
 
     # The cleaned DataFrame holds full body text for ~250k acts (3-5 GB
-    # uncompressed). Release before Pandera reloads the acte parquet, which
+    # uncompressed). Release before Pandera reloads the documents parquet, which
     # otherwise OOMs the 16 GB CI runner.
     del df
 
     avg = scoresum[0] / n_unique if n_unique else 0.0
-    logger.info(f"  acte:     {n_acts:>8d} rows")
-    logger.info(f"  articole: {n_articles:>8d} rows")
-    logger.info(f"  alineate: {n_paragraphs:>8d} rows")
+    logger.info(f"  documents: {n_acts:>8d} rows")
+    logger.info(f"  articles:  {n_articles:>8d} rows")
+    logger.info(f"  paragraphs:{n_paragraphs:>8d} rows")
     logger.info(f"  mean quality:           {avg:.3f}")
     logger.info(f"  high   (≥{HIGH_QUALITY}):           {bands['high']:>6d}")
     logger.info(f"  medium ({MEDIUM_QUALITY}–{HIGH_QUALITY}):       {bands['medium']:>6d}")
@@ -212,12 +211,12 @@ def main() -> None:
 
     # 3. Validate written parquets against Pandera schemas.
     validate_parquets(
-        REPO_ROOT / "data" / "acte.parquet",
-        REPO_ROOT / "data" / "articole.parquet",
-        REPO_ROOT / "data" / "alineate.parquet",
+        REPO_ROOT / "data" / "documents.parquet",
+        REPO_ROOT / "data" / "articles.parquet",
+        REPO_ROOT / "data" / "paragraphs.parquet",
     )
 
-    # 4. Build FTS index over articole.
+    # 4. Build FTS index over articles.
     build_fts_index()
 
     # 5. Relationship edges from the cached affects_html (no FK; targets can be
@@ -230,7 +229,7 @@ def main() -> None:
     digest = write_combined_sha256()
     logger.info(f"  sha256: {digest}")
     logger.success(
-        f"pipeline: DONE — {n_acts} acte / {n_articles} articole / {n_paragraphs} alineate "
+        f"pipeline: DONE — {n_acts} documents / {n_articles} articles / {n_paragraphs} paragraphs "
         f"/ {n_edges} relationships + FTS"
     )
 

@@ -26,11 +26,11 @@ from etl.transforms.relationships import KINDS
 # memory during validation, which OOMs the 16 GB CI runner.
 
 
-class Acts(pa.DataFrameModel):
+class Documents(pa.DataFrameModel):
     id: int = pa.Field(unique=True, ge=1)
     type: str
-    act_number: str = pa.Field(nullable=True)
-    act_citation: str
+    document_number: str = pa.Field(nullable=True)
+    document_citation: str
     issuer: str
     title: str
     adopted_at: date = pa.Field(nullable=True)
@@ -44,7 +44,7 @@ class Acts(pa.DataFrameModel):
 
 class Articles(pa.DataFrameModel):
     id: int = pa.Field(unique=True, ge=1)
-    act_id: int = pa.Field(ge=1)
+    document_id: int = pa.Field(ge=1)
     article_number: int = pa.Field(nullable=True)
     article_variant: str = pa.Field(nullable=True)
     article_citation: str
@@ -77,25 +77,23 @@ def check_referential_integrity(
     acts: pl.DataFrame, articles: pl.DataFrame, paragraphs: pl.DataFrame
 ) -> None:
     """All FK references must resolve. Raises `ValueError` listing the orphans."""
-    act_ids = set(acts["id"].to_list())
-    orphan_articles = articles.filter(~pl.col("act_id").is_in(list(act_ids)))
+    document_ids = set(acts["id"].to_list())
+    orphan_articles = articles.filter(~pl.col("document_id").is_in(list(document_ids)))
     if orphan_articles.height:
         raise ValueError(
-            f"{orphan_articles.height} articole rows reference non-existent acte.id; "
-            f"first offenders: {orphan_articles['act_id'].head(5).to_list()}"
+            f"{orphan_articles.height} article rows reference a non-existent document id; "
+            f"first offenders: {orphan_articles['document_id'].head(5).to_list()}"
         )
     article_ids = set(articles["id"].to_list())
     orphan_paragraphs = paragraphs.filter(~pl.col("article_id").is_in(list(article_ids)))
     if orphan_paragraphs.height:
         raise ValueError(
-            f"{orphan_paragraphs.height} alineate rows reference non-existent articole.id; "
+            f"{orphan_paragraphs.height} paragraph rows reference a non-existent article id; "
             f"first offenders: {orphan_paragraphs['article_id'].head(5).to_list()}"
         )
 
 
-def validate_parquets(
-    acts_path: Path, articles_path: Path, paragraphs_path: Path
-) -> None:
+def validate_parquets(acts_path: Path, articles_path: Path, paragraphs_path: Path) -> None:
     """Validate the three written parquets against the schemas + FK integrity.
 
     Pandera Polars needs an eager DataFrame to validate, but the `content`
@@ -110,11 +108,11 @@ def validate_parquets(
     articles = pl.scan_parquet(articles_path).drop("content").collect()
     paragraphs = pl.scan_parquet(paragraphs_path).drop("content").collect()
 
-    Acts.validate(acts, lazy=True)
+    Documents.validate(acts, lazy=True)
     Articles.validate(articles, lazy=True)
     Paragraphs.validate(paragraphs, lazy=True)
     check_referential_integrity(acts, articles, paragraphs)
     logger.success(
-        f"schemas: OK — {acts.height} acte / {articles.height} articole / "
-        f"{paragraphs.height} alineate"
+        f"schemas: OK — {acts.height} documents / {articles.height} articles / "
+        f"{paragraphs.height} paragraphs"
     )

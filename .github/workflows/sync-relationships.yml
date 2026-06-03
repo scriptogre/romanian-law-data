@@ -71,7 +71,7 @@ jobs:
         run: |
           mkdir -p data
           LATEST=$(gh release list --json tagName --jq '[.[] | select(.tagName | startswith("laws/"))][0].tagName')
-          gh release download "$LATEST" --pattern 'acte.parquet' --dir data
+          gh release download "$LATEST" --pattern 'documents.parquet' --dir data
           gh release download relationships --pattern 'raw_relationships.parquet' --dir data || echo "no cache yet"
       - name: Extract shard
         run: uv run python -m etl.extract relationships
@@ -99,7 +99,7 @@ jobs:
         run: |
           mkdir -p data
           LATEST=$(gh release list --json tagName --jq '[.[] | select(.tagName | startswith("laws/"))][0].tagName')
-          gh release download "$LATEST" --pattern 'acte.parquet' --dir data
+          gh release download "$LATEST" --pattern 'documents.parquet' --dir data
           gh release download relationships --pattern 'raw_relationships.parquet' --dir data || echo "first round, no cache"
       - uses: actions/download-artifact@v6
         with:

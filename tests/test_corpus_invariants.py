@@ -14,9 +14,9 @@ import duckdb
 import pytest
 
 DATA_DIR = Path(__file__).parent.parent / "data"
-ACTE = DATA_DIR / "acte.parquet"
-ARTICOLE = DATA_DIR / "articole.parquet"
-ALINEATE = DATA_DIR / "alineate.parquet"
+DOCUMENTS = DATA_DIR / "documents.parquet"
+ARTICLES = DATA_DIR / "articles.parquet"
+PARAGRAPHS = DATA_DIR / "paragraphs.parquet"
 
 # Smoke runs (`just smoke`) produce ~1k acts — too small for the invariant
 # floors and code-specific article counts below. Skip whenever the parquet
@@ -25,11 +25,11 @@ _FULL_CORPUS_FLOOR = 100_000
 
 
 def _have_full_corpus() -> bool:
-    if not (ACTE.exists() and ARTICOLE.exists() and ALINEATE.exists()):
+    if not (DOCUMENTS.exists() and ARTICLES.exists() and PARAGRAPHS.exists()):
         return False
     c = duckdb.connect(":memory:")
     try:
-        (n,) = c.execute(f"SELECT count(*) FROM read_parquet('{ACTE}')").fetchone()
+        (n,) = c.execute(f"SELECT count(*) FROM read_parquet('{DOCUMENTS}')").fetchone()
     finally:
         c.close()
     return n >= _FULL_CORPUS_FLOOR
@@ -44,9 +44,9 @@ pytestmark = pytest.mark.skipif(
 @pytest.fixture(scope="module")
 def con():
     c = duckdb.connect(":memory:")
-    c.execute(f"CREATE VIEW acte AS SELECT * FROM read_parquet('{ACTE}')")
-    c.execute(f"CREATE VIEW articole AS SELECT * FROM read_parquet('{ARTICOLE}')")
-    c.execute(f"CREATE VIEW alineate AS SELECT * FROM read_parquet('{ALINEATE}')")
+    c.execute(f"CREATE VIEW documents AS SELECT * FROM read_parquet('{DOCUMENTS}')")
+    c.execute(f"CREATE VIEW articles AS SELECT * FROM read_parquet('{ARTICLES}')")
+    c.execute(f"CREATE VIEW paragraphs AS SELECT * FROM read_parquet('{PARAGRAPHS}')")
     yield c
     c.close()
 
@@ -56,52 +56,52 @@ def con():
 # show up as drops below these floors.
 
 
-def test_acte_volume_floor(con):
-    (n,) = con.execute("SELECT count(*) FROM acte").fetchone()
-    assert n >= 180_000, f"acte dropped to {n}"
+def test_documents_volume_floor(con):
+    (n,) = con.execute("SELECT count(*) FROM documents").fetchone()
+    assert n >= 180_000, f"documents dropped to {n}"
 
 
-def test_articole_volume_floor(con):
-    (n,) = con.execute("SELECT count(*) FROM articole").fetchone()
-    assert n >= 950_000, f"articole dropped to {n}"
+def test_articles_volume_floor(con):
+    (n,) = con.execute("SELECT count(*) FROM articles").fetchone()
+    assert n >= 950_000, f"articles dropped to {n}"
 
 
-def test_alineate_volume_floor(con):
-    (n,) = con.execute("SELECT count(*) FROM alineate").fetchone()
-    assert n >= 1_900_000, f"alineate dropped to {n}"
+def test_paragraphs_volume_floor(con):
+    (n,) = con.execute("SELECT count(*) FROM paragraphs").fetchone()
+    assert n >= 1_900_000, f"paragraphs dropped to {n}"
 
 
 # ── primary-key integrity ───────────────────────────────────────────────────
 
 
-def test_no_duplicate_act_ids(con):
-    (n,) = con.execute("SELECT count(*) - count(DISTINCT id) FROM acte").fetchone()
+def test_no_duplicate_document_ids(con):
+    (n,) = con.execute("SELECT count(*) - count(DISTINCT id) FROM documents").fetchone()
     assert n == 0
 
 
 def test_no_duplicate_article_ids(con):
-    (n,) = con.execute("SELECT count(*) - count(DISTINCT id) FROM articole").fetchone()
+    (n,) = con.execute("SELECT count(*) - count(DISTINCT id) FROM articles").fetchone()
     assert n == 0
 
 
 def test_no_duplicate_paragraph_ids(con):
-    (n,) = con.execute("SELECT count(*) - count(DISTINCT id) FROM alineate").fetchone()
+    (n,) = con.execute("SELECT count(*) - count(DISTINCT id) FROM paragraphs").fetchone()
     assert n == 0
 
 
 # ── referential integrity ───────────────────────────────────────────────────
 
 
-def test_all_article_act_ids_exist(con):
+def test_all_article_document_ids_exist(con):
     (n,) = con.execute(
-        "SELECT count(*) FROM articole WHERE act_id NOT IN (SELECT id FROM acte)"
+        "SELECT count(*) FROM articles WHERE document_id NOT IN (SELECT id FROM documents)"
     ).fetchone()
     assert n == 0
 
 
-def test_all_alineate_article_ids_exist(con):
+def test_all_paragraphs_article_ids_exist(con):
     (n,) = con.execute(
-        "SELECT count(*) FROM alineate WHERE article_id NOT IN (SELECT id FROM articole)"
+        "SELECT count(*) FROM paragraphs WHERE article_id NOT IN (SELECT id FROM articles)"
     ).fetchone()
     assert n == 0
 
@@ -149,8 +149,8 @@ def test_all_alineate_article_ids_exist(con):
 def test_known_code_article_counts(con, name, where_clause, expected_article_count):
     rows = con.execute(
         f"""
-        SELECT (SELECT count(*) FROM articole WHERE act_id = a.id) AS n_art
-        FROM acte a
+        SELECT (SELECT count(*) FROM articles WHERE document_id = a.id) AS n_art
+        FROM documents a
         WHERE {where_clause}
         ORDER BY length(content) DESC
         LIMIT 1
