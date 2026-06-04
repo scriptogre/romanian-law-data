@@ -28,6 +28,7 @@ import asyncio
 import html as html_lib
 import os
 import re
+import subprocess
 import time
 from pathlib import Path
 
@@ -47,7 +48,17 @@ UA = (
 # SOAP record fields, kept verbatim so the transform is unchanged. The detail
 # page carries all of them: id (LinkHtml), title + subtitle (S_DEN/S_PAR),
 # issuer (S_EMT_BDY), publication (S_PUB_BDY), and the full act body.
-SOAP_FIELDS = ("Titlu", "Text", "TipAct", "Numar", "Emitent", "Publicatie", "DataVigoare", "LinkHtml")
+SOAP_FIELDS = (
+    "Titlu",
+    "Text",
+    "TipAct",
+    "Numar",
+    "Emitent",
+    "Publicatie",
+    "DataVigoare",
+    "LinkHtml",
+)
+
 
 def _env_int(name: str, default: int) -> int:
     """Read an int env var, treating unset OR empty (CI passes "" for blank inputs) as the default."""
@@ -55,8 +66,12 @@ def _env_int(name: str, default: int) -> int:
 
 
 CONCURRENCY = _env_int("ETL_DOCUMENTS_CONCURRENCY", 8)
-CHUNK = _env_int("ETL_DOCUMENTS_CHUNK", 5000)
+CHUNK = _env_int("ETL_DOCUMENTS_CHUNK", 2000)
 MIN_ID = _env_int("ETL_DOCUMENTS_MIN_ID", 1)
+# Wall-clock budget per run. A shard stops cleanly before the CI ~6h job cap, writing what it
+# got; ids it didn't reach (plus any still-throttling) resume next run. The sweep never needs to
+# finish in one run. Default 4.5h leaves margin under the 350-min cap even after the last chunk.
+DEADLINE_SECONDS = _env_int("ETL_DOCUMENTS_DEADLINE", 16200)
 # Top of the id sweep = the newest document id on the portal. Discovered at run time
 # (see discover_max_id); the env var pins it for one run, the constant is only a
 # last-resort fallback if probing fails.
@@ -72,7 +87,7 @@ SWEEP_MARGIN = 1000
 PROBE_ABORT_ID = 5_000_000
 CONNECT_TIMEOUT = 5
 READ_TIMEOUT = 30
-RETRY_PASSES = 4
+RETRY_PASSES = 2  # ids still throttling after this resume next run, so keep passes cheap
 THROTTLE_BACKOFF = 2.0  # seconds to wait after a 503/429 before the id is retried next pass
 # 500 is the portal's "no act at this id" signal (every dead id returns it) but also a
 # possible transient error. Re-check a few times inline: a real act recovers, a dead id
@@ -81,11 +96,30 @@ SOFT_RETRIES = 2
 SOFT_RETRY_BACKOFF = 2.0
 
 REPO_ROOT = Path(__file__).parent.parent.parent
-RAW_DIR = REPO_ROOT / "data" / "raw_documents"
+DATA_DIR = REPO_ROOT / "data"
+RAW_DIR = DATA_DIR / "raw_documents"
+SWEPT_DIR = DATA_DIR / "swept"  # per-shard parts: every id given a definitive answer (live or dead)
+REMAINING_IDS_PATH = DATA_DIR / "remaining_ids.txt"  # written by the prepare job; the resume list
+# Durable cross-run cache (a prerelease in CI). swept_ids is the resume key: it includes dead ids,
+# so REMAINING can actually reach 0 (a sweep over a range with holes can't key off found acts alone).
+CACHE_DOCUMENTS = DATA_DIR / "raw_documents.parquet"
+CACHE_VERSIONS = DATA_DIR / "raw_versions.parquet"
+CACHE_SWEPT = DATA_DIR / "swept_ids.parquet"
+RELEASE_TAG = os.environ.get("ETL_DOCUMENTS_RELEASE_TAG")
 
 RO_MONTHS = {
-    "ianuarie": 1, "februarie": 2, "martie": 3, "aprilie": 4, "mai": 5, "iunie": 6,
-    "iulie": 7, "august": 8, "septembrie": 9, "octombrie": 10, "noiembrie": 11, "decembrie": 12,
+    "ianuarie": 1,
+    "februarie": 2,
+    "martie": 3,
+    "aprilie": 4,
+    "mai": 5,
+    "iunie": 6,
+    "iulie": 7,
+    "august": 8,
+    "septembrie": 9,
+    "octombrie": 10,
+    "noiembrie": 11,
+    "decembrie": 12,
 }
 
 
@@ -143,7 +177,11 @@ def parse_document(document_id: int, html: str) -> dict | None:
 
     start = html.find('<span class="S_DEN">')
     end = next(
-        (i for i in (html.find(m, start) for m in ('id="fisa_act_container"', 'data-id="FisaAct"')) if i != -1),
+        (
+            i
+            for i in (html.find(m, start) for m in ('id="fisa_act_container"', 'data-id="FisaAct"'))
+            if i != -1
+        ),
         len(html),
     )
     text = _clean(html[start:end])
@@ -216,18 +254,24 @@ async def _one_pass(session: requests.Session, ids: list[int]) -> dict[int, tupl
                 acts = sum(1 for r in result.values() if isinstance(r, tuple))
                 rate = len(result) / (now - start)
                 eta_min = (len(ids) - len(result)) / rate / 60 if rate else 0
-                logger.info(f"  {len(result)}/{len(ids)} fetched, {acts} acts ({rate:.1f}/s, ETA {eta_min:.0f}m)")
+                logger.info(
+                    f"  {len(result)}/{len(ids)} fetched, {acts} acts ({rate:.1f}/s, ETA {eta_min:.0f}m)"
+                )
 
     await asyncio.gather(*(one(i) for i in ids))
     return result
 
 
-async def fetch_chunk(session: requests.Session, ids: list[int]) -> list[tuple]:
+async def fetch_chunk(session: requests.Session, ids: list[int]) -> tuple[list[tuple], list[int]]:
     """Fetch a chunk of ids, retrying only the transient ones over a few passes.
 
-    Each kept item is `(record, version_rows)` parsed from one act page.
+    Returns `(acts, resolved)`:
+      acts     -> `(record, version_rows)` per live id, parsed from the page
+      resolved -> every id given a DEFINITIVE answer (a live act OR a confirmed dead id). Ids still
+                  throttling after RETRY_PASSES are NOT resolved; they stay unfetched and resume next run.
     """
     acts: dict[int, tuple] = {}
+    resolved: set[int] = set()
     pending = ids
 
     for attempt in range(1, RETRY_PASSES + 1):
@@ -236,17 +280,21 @@ async def fetch_chunk(session: requests.Session, ids: list[int]) -> list[tuple]:
         for document_id, outcome in outcomes.items():
             if isinstance(outcome, tuple):
                 acts[document_id] = outcome
+                resolved.add(document_id)
             elif outcome == "retry":
                 retry.append(document_id)
-            # None -> dead id, drop it
+            else:  # None -> confirmed dead id (definitively resolved, just no act)
+                resolved.add(document_id)
         pending = retry
         logger.info(f"  pass {attempt}: {len(acts)} acts, {len(pending)} transient left")
         if not pending:
             break
 
     if pending:
-        logger.warning(f"  {len(pending)} ids still failing after {RETRY_PASSES} passes (likely throttle)")
-    return [acts[i] for i in sorted(acts)]
+        logger.warning(
+            f"  {len(pending)} ids still throttling after {RETRY_PASSES} passes (resume next run)"
+        )
+    return [acts[i] for i in sorted(acts)], sorted(resolved)
 
 
 def _is_live(session: requests.Session, document_id: int) -> bool | None:
@@ -315,38 +363,56 @@ def print_max_id() -> None:
 
 
 def run() -> None:
-    """Sweep this shard's id stride, fetching detail pages in chunks into parquet parts."""
-    concurrency = CONCURRENCY
+    """Sweep this shard's slice of the still-unfetched ids, in chunks, within a wall-clock budget.
+
+    Resumable: when `prepare` has written remaining_ids.txt (the full id range minus ids already
+    swept in prior runs), this shard takes remaining[shard::shards]; otherwise (a standalone local
+    run) it falls back to the full strided range. Whatever this run can't reach before DEADLINE
+    is left for the next run. A per-shard swept manifest records every id given a definitive
+    answer, so the merge step can tell when the corpus is complete.
+    """
     shard = int(os.environ.get("ETL_DOCUMENTS_SHARD", 0))
     shards = int(os.environ.get("ETL_DOCUMENTS_SHARDS", 1))
     limit_raw = os.environ.get("ETL_DOCUMENTS_LIMIT")
     limit = int(limit_raw) if limit_raw else None
+    deadline = time.time() + DEADLINE_SECONDS
 
     session = _session()
 
-    # Ceiling: pinned by env (the prepare job discovers it once and hands it to every
-    # shard), else discover it here so a standalone local run still sweeps the whole corpus.
-    max_id_env = os.environ.get("ETL_DOCUMENTS_MAX_ID")
-    max_id = int(max_id_env) if max_id_env else discover_max_id(session)
-
-    schema = {field: pl.Utf8 for field in SOAP_FIELDS}
-    ids = list(range(MIN_ID + shard, max_id + 1, shards))
+    if REMAINING_IDS_PATH.exists():
+        remaining = [int(x) for x in REMAINING_IDS_PATH.read_text().split()]
+        ids = remaining[shard::shards]
+        span = f"{len(remaining)} remaining"
+    else:
+        # Ceiling: pinned by env (prepare discovers it once for every shard), else discover here.
+        max_id_env = os.environ.get("ETL_DOCUMENTS_MAX_ID")
+        max_id = int(max_id_env) if max_id_env else discover_max_id(session)
+        ids = list(range(MIN_ID + shard, max_id + 1, shards))
+        span = f"ids {MIN_ID}..{max_id} (stride {shards})"
     if limit is not None:
         ids = ids[:limit]
 
+    schema = {field: pl.Utf8 for field in SOAP_FIELDS}
     RAW_DIR.mkdir(parents=True, exist_ok=True)
+    SWEPT_DIR.mkdir(parents=True, exist_ok=True)
     logger.info(
-        f"documents: shard {shard}/{shards}, ids {MIN_ID}..{max_id} (stride {shards}, "
-        f"{len(ids)} this shard), concurrency {concurrency}"
+        f"documents: shard {shard}/{shards}, {span} ({len(ids)} this shard), budget {DEADLINE_SECONDS}s"
     )
 
     total = 0
+    swept: list[int] = []
     for offset in range(0, len(ids), CHUNK):
+        if time.time() > deadline:
+            logger.warning(
+                f"shard {shard}: budget reached at {offset}/{len(ids)} ids; the rest resumes next run"
+            )
+            break
         chunk = ids[offset : offset + CHUNK]
-        results = asyncio.run(fetch_chunk(session, chunk))
-        if results:
-            records = [record for record, _ in results]
-            version_rows = [row for _, rows in results for row in rows]
+        records_versions, resolved = asyncio.run(fetch_chunk(session, chunk))
+        swept.extend(resolved)
+        if records_versions:
+            records = [record for record, _ in records_versions]
+            version_rows = [row for _, rows in records_versions for row in rows]
 
             part = RAW_DIR / f"part_shard{shard:03d}_{chunk[0]:08d}.parquet"
             pl.DataFrame(records, schema=schema).write_parquet(part, compression="zstd")
@@ -359,4 +425,91 @@ def run() -> None:
                 f"(total {total}, through id {chunk[-1]}) -> {part.name}"
             )
 
-    logger.success(f"shard {shard}/{shards} done: {total} acts, swept {len(ids)} ids")
+    pl.DataFrame({"id": swept}, schema={"id": pl.Int64}).write_parquet(
+        SWEPT_DIR / f"swept_shard{shard:03d}.parquet", compression="zstd"
+    )
+    logger.success(f"shard {shard}/{shards} done: {total} acts, {len(swept)} ids resolved this run")
+
+
+def _fold(cache: Path, parts: list[Path], schema: dict, unique_on: list[str]) -> pl.DataFrame:
+    """Concat the durable cache (if any) with this run's parts and dedup, keeping the latest."""
+    frames = ([pl.read_parquet(cache)] if cache.exists() else []) + [
+        pl.read_parquet(p) for p in parts
+    ]
+    if not frames:
+        return pl.DataFrame(schema=schema)
+    return pl.concat(frames).unique(subset=unique_on, keep="last")
+
+
+def merge() -> None:
+    """Fold this run's shard parts into the durable documents cache and report REMAINING.
+
+    Cache = raw_documents.parquet + raw_versions.parquet + swept_ids.parquet. `prepare` diffs the
+    swept ids against the full id range to get the still-unfetched ids for the next run. REMAINING
+    (printed to stdout) is how CI knows the corpus is complete and the publish job may run.
+    """
+    # documents: fold cache + this run's parts with DuckDB (out-of-core — the full-text corpus is too
+    # big to hold in memory). Dedup by trailing id is a safety net; ids across runs are normally disjoint.
+    doc_sources = ([str(CACHE_DOCUMENTS)] if CACHE_DOCUMENTS.exists() else []) + [
+        str(p) for p in sorted(RAW_DIR.glob("*.parquet"))
+    ]
+    n_docs = 0
+    if doc_sources:
+        import duckdb
+
+        srcs = "[" + ", ".join(f"'{s}'" for s in doc_sources) + "]"
+        tmp = CACHE_DOCUMENTS.parent / (CACHE_DOCUMENTS.name + ".tmp")
+        duckdb.connect().execute(
+            f"COPY (SELECT {', '.join(SOAP_FIELDS)} FROM ("
+            f"  SELECT *, row_number() OVER (PARTITION BY regexp_extract(LinkHtml, '([0-9]+)$', 1)) AS _rn"
+            f"  FROM read_parquet({srcs})"
+            f") WHERE _rn = 1) TO '{tmp}' (FORMAT parquet, COMPRESSION zstd)"
+        )
+        tmp.replace(CACHE_DOCUMENTS)
+        n_docs = pl.scan_parquet(CACHE_DOCUMENTS).select(pl.len()).collect().item()
+
+    versions_df = _fold(
+        CACHE_VERSIONS,
+        sorted((DATA_DIR / "raw_versions").glob("*.parquet")),
+        versions.SCHEMA,
+        ["document_id", "date"],
+    )
+    versions_df.write_parquet(CACHE_VERSIONS, compression="zstd")
+
+    swept_df = _fold(CACHE_SWEPT, sorted(SWEPT_DIR.glob("*.parquet")), {"id": pl.Int64}, ["id"])
+    swept_df.write_parquet(CACHE_SWEPT, compression="zstd")
+
+    max_id_env = os.environ.get("ETL_DOCUMENTS_MAX_ID")
+    max_id = int(max_id_env) if max_id_env else discover_max_id(_session())
+    swept_ids = set(swept_df["id"].to_list())
+    remaining = len(set(range(MIN_ID, max_id + 1)) - swept_ids)
+    logger.success(
+        f"merge: {n_docs} acts cached, {len(swept_ids)} ids swept, REMAINING={remaining}"
+    )
+
+    if RELEASE_TAG:
+        exists = (
+            subprocess.run(["gh", "release", "view", RELEASE_TAG], capture_output=True).returncode
+            == 0
+        )
+        if not exists:
+            subprocess.run(
+                [
+                    "gh",
+                    "release",
+                    "create",
+                    RELEASE_TAG,
+                    "--prerelease",
+                    "--title",
+                    "documents sweep cache",
+                    "--notes",
+                    "Resumable raw document sweep (raw_documents + raw_versions + swept ids). Rebuilt by sync-documents.",
+                ],
+                check=True,
+            )
+        for asset in (CACHE_DOCUMENTS, CACHE_VERSIONS, CACHE_SWEPT):
+            subprocess.run(
+                ["gh", "release", "upload", RELEASE_TAG, str(asset), "--clobber"], check=True
+            )
+
+    print(f"REMAINING={remaining}")

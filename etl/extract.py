@@ -3,8 +3,9 @@ Stage 1 — extract.py
 
 Thin dispatcher over the per-domain extractions in `extracts/`:
 
-    python -m etl.extract documents             # SOAP corpus walk -> data/raw_documents/
+    python -m etl.extract documents             # sweep this shard's remaining ids (budgeted, resumable)
     python -m etl.extract documents-max-id      # discover newest document id, print to stdout
+    python -m etl.extract documents-merge       # fold shard parts into the cache, print REMAINING
     python -m etl.extract relationships         # fetch one /Public/actiuni* shard
     python -m etl.extract relationships-merge   # fold shards into the cache + publish
 
@@ -18,6 +19,7 @@ from etl.extracts import documents, relationships
 STAGES = {
     "documents": documents.run,
     "documents-max-id": documents.print_max_id,
+    "documents-merge": documents.merge,
     "relationships": relationships.run,
     "relationships-merge": relationships.merge,
 }

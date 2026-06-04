@@ -1,12 +1,15 @@
 name: sync-documents
 
-# Builds the legal corpus release. The fetch sweeps the document-id space and
-# reads each act's /Public/DetaliiDocument/{id} page (the SOAP Search API has no
-# stable sort, so paginating it drops ~1/3 of acts; see extracts/documents.py).
-# SHARDED across N runners (= N IPs) by id stride; the site throttles per IP, so
-# N runners ~= Nx throughput. Each shard writes parquet parts into
-# data/raw_documents/; the publish job gathers them, transforms, validates, and
-# publishes. publish only runs if ALL shards succeed (a partial corpus must not publish).
+# Builds the legal corpus release by sweeping the document-id space and reading each act's
+# /Public/DetaliiDocument/{id} page (the SOAP Search API drops ~1/3 of acts; see extracts/documents.py).
+#
+# RESUMABLE. The portal throttles per IP (~1 req/s), so the full sweep can't finish inside CI's job cap.
+# Each run instead fetches only still-unfetched ids, within a wall-clock budget, and checkpoints into a
+# durable `documents-cache` prerelease (raw_documents + raw_versions + swept ids — swept includes dead
+# ids, so coverage can actually reach 100%). `prepare` diffs swept against the id range to get the
+# remaining ids; shards sweep their slice; `merge` folds parts back into the cache and reports REMAINING.
+# `publish` ships laws/<date> only once REMAINING is ~0. The nightly cron resumes where the last run
+# stopped; once complete it just picks up newly-published ids. No single run ever needs to (or can) finish.
 
 on:
   schedule:
@@ -14,23 +17,27 @@ on:
   workflow_dispatch:
     inputs:
       shards:
-        description: "Parallel runners (= IPs)."
-        default: "16"
+        description: "Parallel runners (= IPs). 20 is the GitHub Free concurrency cap."
+        default: "20"
       limit:
         description: "Cap ids per shard (smoke runs). Empty = full."
         default: ""
       max_id:
-        description: "Pin the top of the id sweep. Empty = auto-discover the newest id (default)."
+        description: "Pin the top of the id sweep. Empty = auto-discover (default)."
         default: ""
       release_tag:
-        description: "Publish to this tag instead of laws/<date> (e.g. smoke/2026-06-03)."
+        description: "Publish corpus to this tag instead of laws/<date> (e.g. smoke/2026-06-04)."
         default: ""
+      cache_tag:
+        description: "Durable sweep-cache release. Use a throwaway tag for smokes."
+        default: "documents-cache"
 
 permissions:
   contents: write
 
 env:
-  SHARDS: ${{ inputs.shards || '16' }}
+  SHARDS: ${{ inputs.shards || '20' }}
+  CACHE_TAG: ${{ inputs.cache_tag || 'documents-cache' }}
   GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
 jobs:
@@ -39,6 +46,7 @@ jobs:
     outputs:
       matrix: ${{ steps.gen.outputs.matrix }}
       max_id: ${{ steps.max_id.outputs.max_id }}
+      remaining: ${{ steps.remaining.outputs.remaining }}
     steps:
       - id: gen
         run: echo "matrix=$(seq 0 $((SHARDS - 1)) | jq -R . | jq -cs .)" >> "$GITHUB_OUTPUT"
@@ -48,18 +56,37 @@ jobs:
           enable-cache: true
       - run: uv python install 3.12
       - run: uv sync
-      - name: Discover newest document id (one probe, shared by every shard)
+      - name: Discover newest document id
         id: max_id
         run: |
-          # Honour a pinned max_id input; otherwise probe the portal for the newest act id.
           if [ -n "${{ inputs.max_id }}" ]; then
             MAX_ID="${{ inputs.max_id }}"
-            echo "max_id pinned by input: $MAX_ID"
           else
             MAX_ID=$(uv run python -m etl.extract documents-max-id | tail -n1)
-            echo "max_id discovered: $MAX_ID"
           fi
           echo "max_id=$MAX_ID" >> "$GITHUB_OUTPUT"
+      - name: Compute still-unfetched ids from the cache
+        id: remaining
+        run: |
+          mkdir -p data
+          gh release download "$CACHE_TAG" --pattern 'swept_ids.parquet' --dir data || echo "no cache yet -> full sweep"
+          REMAINING=$(MAX_ID="${{ steps.max_id.outputs.max_id }}" uv run python - <<'EOF'
+          import os, pathlib
+          import polars as pl
+          max_id = int(os.environ["MAX_ID"])
+          p = pathlib.Path("data/swept_ids.parquet")
+          swept = set(pl.read_parquet(p)["id"].to_list()) if p.exists() else set()
+          remaining = [i for i in range(1, max_id + 1) if i not in swept]
+          pathlib.Path("data/remaining_ids.txt").write_text("\n".join(map(str, remaining)))
+          print(len(remaining))
+          EOF
+          )
+          echo "remaining=$REMAINING" >> "$GITHUB_OUTPUT"
+          echo "remaining ids: $REMAINING (of 1..${{ steps.max_id.outputs.max_id }})"
+      - uses: actions/upload-artifact@v7
+        with:
+          name: remaining-ids
+          path: data/remaining_ids.txt
 
   extract:
     needs: prepare
@@ -71,7 +98,7 @@ jobs:
         shard: ${{ fromJSON(needs.prepare.outputs.matrix) }}
     env:
       ETL_DOCUMENTS_SHARD: ${{ matrix.shard }}
-      ETL_DOCUMENTS_SHARDS: ${{ inputs.shards || '16' }}
+      ETL_DOCUMENTS_SHARDS: ${{ inputs.shards || '20' }}
       ETL_DOCUMENTS_LIMIT: ${{ inputs.limit }}
       ETL_DOCUMENTS_MAX_ID: ${{ needs.prepare.outputs.max_id }}
     steps:
@@ -81,7 +108,11 @@ jobs:
           enable-cache: true
       - run: uv python install 3.12
       - run: uv sync
-      - name: Extract shard
+      - uses: actions/download-artifact@v6
+        with:
+          name: remaining-ids
+          path: data
+      - name: Sweep this shard's slice (budgeted, resumable)
         run: uv run python -m etl.extract documents
       - uses: actions/upload-artifact@v7
         with:
@@ -93,9 +124,54 @@ jobs:
           name: raw-versions-${{ matrix.shard }}
           path: data/raw_versions/*.parquet
           if-no-files-found: ignore
+      - uses: actions/upload-artifact@v7
+        with:
+          name: swept-${{ matrix.shard }}
+          path: data/swept/*.parquet
+          if-no-files-found: ignore
+
+  merge:
+    needs: [prepare, extract]
+    if: ${{ !cancelled() && needs.prepare.result == 'success' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    outputs:
+      remaining: ${{ steps.merge.outputs.remaining }}
+      complete: ${{ steps.merge.outputs.complete }}
+    env:
+      ETL_DOCUMENTS_RELEASE_TAG: ${{ inputs.cache_tag || 'documents-cache' }}
+      ETL_DOCUMENTS_MAX_ID: ${{ needs.prepare.outputs.max_id }}
+    steps:
+      - uses: actions/checkout@v6
+      - uses: astral-sh/setup-uv@v8.1.0
+        with:
+          enable-cache: true
+      - run: uv python install 3.12
+      - run: uv sync
+      - name: Download current cache
+        run: |
+          mkdir -p data
+          gh release download "$CACHE_TAG" --pattern 'raw_documents.parquet' --pattern 'raw_versions.parquet' --pattern 'swept_ids.parquet' --dir data || echo "first run, no cache"
+      - uses: actions/download-artifact@v6
+        with: { pattern: raw-documents-*, path: data/raw_documents, merge-multiple: true }
+      - uses: actions/download-artifact@v6
+        with: { pattern: raw-versions-*, path: data/raw_versions, merge-multiple: true }
+      - uses: actions/download-artifact@v6
+        with: { pattern: swept-*, path: data/swept, merge-multiple: true }
+      - name: Fold parts into the cache, report REMAINING
+        id: merge
+        run: |
+          REMAINING=$(uv run python -m etl.extract documents-merge | grep -oE 'REMAINING=[0-9]+' | cut -d= -f2)
+          REMAINING=${REMAINING:-999999}
+          echo "remaining=$REMAINING" >> "$GITHUB_OUTPUT"
+          # complete = whole id range covered. A <=50 straggler tail (a few perma-throttled ids) still
+          # publishes so it can't block forever; the next run keeps trying them.
+          if [ "$REMAINING" -le 50 ]; then echo "complete=true" >> "$GITHUB_OUTPUT"; else echo "complete=false" >> "$GITHUB_OUTPUT"; fi
+          echo "REMAINING=$REMAINING (publish if <=50)"
 
   publish:
-    needs: extract
+    needs: merge
+    if: needs.merge.outputs.complete == 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 120
     steps:
@@ -115,19 +191,11 @@ jobs:
       - run: uv python install 3.12
       - run: uv sync
 
-      - name: Gather raw_documents parts from all shards
-        uses: actions/download-artifact@v6
-        with:
-          pattern: raw-documents-*
-          path: data/raw_documents
-          merge-multiple: true
-
-      - name: Gather raw_versions parts from all shards
-        uses: actions/download-artifact@v6
-        with:
-          pattern: raw-versions-*
-          path: data/raw_versions
-          merge-multiple: true
+      - name: Download the complete sweep cache
+        run: |
+          mkdir -p data/raw_documents
+          gh release download "$CACHE_TAG" --pattern 'raw_documents.parquet' --pattern 'raw_versions.parquet' --dir data
+          cp data/raw_documents.parquet data/raw_documents/all.parquet   # transform reads data/raw_documents/*.parquet
 
       - name: Download relationships cache (for the status column)
         run: gh release download relationships --pattern 'raw_relationships.parquet' --dir data || echo "no relationships cache yet (status will be NULL)"
@@ -142,25 +210,6 @@ jobs:
         id: prep
         run: |
           cp create_views.sql data/create_views.sql
-          # Concat raw shards into single assets (raw_versions may be empty -> empty file).
-          uv run python - <<'EOF'
-          import pathlib
-          import duckdb
-          import polars as pl
-          from etl.extracts import versions
-          con = duckdb.connect()
-          con.execute(
-              "COPY (SELECT * FROM read_parquet('data/raw_documents/*.parquet')) "
-              "TO 'data/raw_documents.parquet' (FORMAT parquet, COMPRESSION zstd)"
-          )
-          if list(pathlib.Path("data/raw_versions").glob("*.parquet")):
-              con.execute(
-                  "COPY (SELECT * FROM read_parquet('data/raw_versions/*.parquet')) "
-                  "TO 'data/raw_versions.parquet' (FORMAT parquet, COMPRESSION zstd)"
-              )
-          else:
-              pl.DataFrame(schema=versions.SCHEMA).write_parquet("data/raw_versions.parquet", compression="zstd")
-          EOF
           cd data
           zstd -3 -f --quiet --rm fts.duckdb -o fts.duckdb.zst
           sha256sum documents.parquet articles.parquet paragraphs.parquet relationships.parquet raw_documents.parquet raw_versions.parquet fts.duckdb.zst create_views.sql > laws.sha256
