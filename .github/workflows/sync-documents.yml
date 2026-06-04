@@ -31,6 +31,9 @@ on:
       cache_tag:
         description: "Durable sweep-cache release. Use a throwaway tag for smokes."
         default: "documents-cache"
+      deadline:
+        description: "Per-shard wall-clock budget in seconds. Empty = 4.5h. Use a small value for smokes."
+        default: ""
 
 permissions:
   contents: write
@@ -101,6 +104,7 @@ jobs:
       ETL_DOCUMENTS_SHARDS: ${{ inputs.shards || '20' }}
       ETL_DOCUMENTS_LIMIT: ${{ inputs.limit }}
       ETL_DOCUMENTS_MAX_ID: ${{ needs.prepare.outputs.max_id }}
+      ETL_DOCUMENTS_DEADLINE: ${{ inputs.deadline }}
     steps:
       - uses: actions/checkout@v6
       - uses: astral-sh/setup-uv@v8.1.0

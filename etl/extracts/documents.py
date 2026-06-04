@@ -87,13 +87,18 @@ SWEEP_MARGIN = 1000
 PROBE_ABORT_ID = 5_000_000
 CONNECT_TIMEOUT = 5
 READ_TIMEOUT = 30
-RETRY_PASSES = 2  # ids still throttling after this resume next run, so keep passes cheap
-THROTTLE_BACKOFF = 2.0  # seconds to wait after a 503/429 before the id is retried next pass
-# 500 is the portal's "no act at this id" signal (every dead id returns it) but also a
-# possible transient error. Re-check a few times inline: a real act recovers, a dead id
-# stays 500. Without this a real act that 500s once under load would be silently dropped.
-SOFT_RETRIES = 2
-SOFT_RETRY_BACKOFF = 2.0
+# Throttled ids are retried pass after pass until they resolve OR the run's wall-clock deadline hits;
+# never abandoned early. (Abandoning after a fixed pass count makes a throttled run resolve only a
+# fraction of its slice, so the sweep converges over months instead of one run.) Between passes we
+# wait THROTTLE_BACKOFF, doubling up to MAX when a whole pass makes zero progress (the per-IP token
+# bucket is empty, so give it time to refill), and resetting to the base once the pass makes headway.
+THROTTLE_BACKOFF = 2.0
+MAX_THROTTLE_BACKOFF = 60.0
+# 500 is the portal's "no act at this id" signal (every dead id returns it) but also a possible
+# transient error. Re-check once, cheaply: a real act recovers, a dead id stays 500. Dead ids are
+# ~40% of the sweep, so this recheck must stay cheap (a multi-second sleep here throttles every run).
+SOFT_RETRIES = 1
+SOFT_RETRY_BACKOFF = 0.5
 
 REPO_ROOT = Path(__file__).parent.parent.parent
 DATA_DIR = REPO_ROOT / "data"
@@ -226,8 +231,10 @@ def fetch_document(session: requests.Session, document_id: int) -> tuple | None 
             if record is None:
                 return None
             return record, versions.parse_versions(document_id, response.text)
-        if code in (429, 503):
-            time.sleep(THROTTLE_BACKOFF)
+        if code in (
+            429,
+            503,
+        ):  # throttled; paced by the inter-pass backoff in fetch_chunk, not here
             return "retry"
         if code == 500:  # dead id OR a transient error; re-check before giving up
             if attempt < SOFT_RETRIES:
@@ -262,38 +269,52 @@ async def _one_pass(session: requests.Session, ids: list[int]) -> dict[int, tupl
     return result
 
 
-async def fetch_chunk(session: requests.Session, ids: list[int]) -> tuple[list[tuple], list[int]]:
-    """Fetch a chunk of ids, retrying only the transient ones over a few passes.
+async def fetch_chunk(
+    session: requests.Session, ids: list[int], deadline: float
+) -> tuple[list[tuple], list[int]]:
+    """Fetch a chunk of ids, retrying the throttled ones pass after pass until the run's deadline.
 
     Returns `(acts, resolved)`:
       acts     -> `(record, version_rows)` per live id, parsed from the page
       resolved -> every id given a DEFINITIVE answer (a live act OR a confirmed dead id). Ids still
-                  throttling after RETRY_PASSES are NOT resolved; they stay unfetched and resume next run.
+                  throttling when the deadline hits are NOT resolved; they stay unfetched, resume next run.
+
+    Pacing: a pass that makes zero progress means the per-IP bucket is empty, so the inter-pass wait
+    doubles (up to MAX) to let it refill; any progress resets it. This settles onto the portal's
+    sustainable rate instead of hammering 503s, so a single budgeted run grinds through its whole slice.
     """
     acts: dict[int, tuple] = {}
     resolved: set[int] = set()
     pending = ids
+    backoff = THROTTLE_BACKOFF
+    attempt = 0
 
-    for attempt in range(1, RETRY_PASSES + 1):
+    while pending and time.time() < deadline:
+        attempt += 1
         outcomes = await _one_pass(session, pending)
-        retry = []
+        retry, progressed = [], False
         for document_id, outcome in outcomes.items():
             if isinstance(outcome, tuple):
                 acts[document_id] = outcome
                 resolved.add(document_id)
+                progressed = True
             elif outcome == "retry":
                 retry.append(document_id)
             else:  # None -> confirmed dead id (definitively resolved, just no act)
                 resolved.add(document_id)
+                progressed = True
         pending = retry
-        logger.info(f"  pass {attempt}: {len(acts)} acts, {len(pending)} transient left")
+        logger.info(f"  pass {attempt}: {len(acts)} acts, {len(pending)} throttling")
         if not pending:
             break
 
+        backoff = THROTTLE_BACKOFF if progressed else min(backoff * 2, MAX_THROTTLE_BACKOFF)
+        nap = min(backoff, deadline - time.time())
+        if nap > 0:
+            await asyncio.sleep(nap)
+
     if pending:
-        logger.warning(
-            f"  {len(pending)} ids still throttling after {RETRY_PASSES} passes (resume next run)"
-        )
+        logger.warning(f"  {len(pending)} ids still throttling at the deadline (resume next run)")
     return [acts[i] for i in sorted(acts)], sorted(resolved)
 
 
@@ -408,7 +429,7 @@ def run() -> None:
             )
             break
         chunk = ids[offset : offset + CHUNK]
-        records_versions, resolved = asyncio.run(fetch_chunk(session, chunk))
+        records_versions, resolved = asyncio.run(fetch_chunk(session, chunk, deadline))
         swept.extend(resolved)
         if records_versions:
             records = [record for record, _ in records_versions]
