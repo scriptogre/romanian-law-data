@@ -33,6 +33,7 @@ import os
 from collections import Counter
 from collections.abc import Iterator
 from concurrent.futures import ProcessPoolExecutor
+from itertools import chain
 from pathlib import Path
 
 import polars as pl
@@ -40,7 +41,7 @@ from loguru import logger
 
 from etl.load import build_fts_index, write_combined_sha256, write_parquets
 from etl.schemas import validate_parquets, validate_relationships
-from etl.transforms import dates, dedup, issuers, relationships, status, text
+from etl.transforms import dates, dedup, issuers, relationships, text
 from etl.transforms.parse import extract_articles, extract_paragraphs
 from etl.transforms.quality import (
     HIGH_QUALITY,
@@ -55,6 +56,10 @@ REPORT_PATH = REPO_ROOT / "data" / "parse_report.jsonl"
 MIN_ARTICLES_FOR_CLEAN_PARSE = 1
 PARSE_WORKERS = int(os.environ.get("ETL_TRANSFORM_WORKERS", max(1, (os.cpu_count() or 4))))
 PARSE_CHUNKSIZE = 100
+# Acts fed to the pool per slice. pool.map pickles its whole input up front, so
+# mapping all ~250k rows at once duplicates the corpus in the task queue and OOMs
+# the 16 GB runner. Slicing caps in-flight tasks (+ buffered results) to this.
+PARSE_BATCH = int(os.environ.get("ETL_TRANSFORM_BATCH", 5_000))
 
 
 def cleanup(lf: pl.LazyFrame) -> pl.LazyFrame:
@@ -76,7 +81,8 @@ def cleanup(lf: pl.LazyFrame) -> pl.LazyFrame:
         .pipe(dates.extract_effective)
         .pipe(dates.clamp_far_future)
         .pipe(dedup.by_titlu_emitent)
-        .pipe(status.add_status)
+        # Status stays NULL: planned to derive in a view from relationships edges.
+        .with_columns(pl.lit(None, dtype=pl.Utf8).alias("Status"))
     )
 
 
@@ -183,8 +189,14 @@ def main() -> None:
         ProcessPoolExecutor(max_workers=PARSE_WORKERS) as pool,
         REPORT_PATH.open("w", encoding="utf-8") as report,
     ):
-        parsed_iter = pool.map(parse_act, df.iter_rows(named=True), chunksize=PARSE_CHUNKSIZE)
-        n_acts, n_articles, n_paragraphs = write_parquets(
+        # One pool.map per slice, chained lazily: chain.from_iterable pulls the
+        # next slice's map only once the current slice drains, so the pool never
+        # holds more than PARSE_BATCH rows of pickled tasks at a time.
+        parsed_iter = chain.from_iterable(
+            pool.map(parse_act, batch.iter_rows(named=True), chunksize=PARSE_CHUNKSIZE)
+            for batch in df.iter_slices(PARSE_BATCH)
+        )
+        n_documents, n_articles, n_paragraphs = write_parquets(
             _parsed_records(parsed_iter, report, bands, gates, scoresum)
         )
 
@@ -194,7 +206,7 @@ def main() -> None:
     del df
 
     avg = scoresum[0] / n_unique if n_unique else 0.0
-    logger.info(f"  documents: {n_acts:>8d} rows")
+    logger.info(f"  documents: {n_documents:>8d} rows")
     logger.info(f"  articles:  {n_articles:>8d} rows")
     logger.info(f"  paragraphs:{n_paragraphs:>8d} rows")
     logger.info(f"  mean quality:           {avg:.3f}")
@@ -229,7 +241,7 @@ def main() -> None:
     digest = write_combined_sha256()
     logger.info(f"  sha256: {digest}")
     logger.success(
-        f"pipeline: DONE — {n_acts} documents / {n_articles} articles / {n_paragraphs} paragraphs "
+        f"pipeline: DONE — {n_documents} documents / {n_articles} articles / {n_paragraphs} paragraphs "
         f"/ {n_edges} relationships + FTS"
     )
 
