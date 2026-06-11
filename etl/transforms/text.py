@@ -43,11 +43,6 @@ def fix_cedilla_str(s: str | None) -> str:
     return (s or "").translate(CEDILLA_TRANSLATE)
 
 
-def strip_bom_str(s: str | None) -> str | None:
-    """Remove leading U+FEFF byte-order marks. SOAP responses often have them."""
-    return s.lstrip("﻿") if s else s
-
-
 def decode_html_entities_str(s: str | None) -> str | None:
     """Decode the entities listed in `data/lookups/html_entities.yaml`.
     Single-pass — `&amp;lt;` becomes `&lt;`, not `<`. Matches `decode_html_entities`.
@@ -65,14 +60,6 @@ def fix_replacement_chars_str(s: str | None) -> str | None:
 def normalize_nfc_str(s: str | None) -> str | None:
     """Compose decomposed sequences (e.g. a + combining-breve → ă)."""
     return unicodedata.normalize("NFC", s) if s else s
-
-
-def blank_to_none(s: str | None) -> str | None:
-    """Collapse empty / whitespace-only strings to None."""
-    if s is None:
-        return None
-    stripped = s.strip()
-    return stripped or None
 
 
 # ── LazyFrame transforms (composable via .pipe()) ───────────────────────────

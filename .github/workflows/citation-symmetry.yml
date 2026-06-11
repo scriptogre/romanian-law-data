@@ -144,12 +144,12 @@ jobs:
               for x in citers:
                   ox = out_of(x)
                   rows.append({
-                      "act_id": a,
+                      "document_id": a,
                       "citer_id": x,
                       "found_in_outgoing": None if ox is None else (str(a) in ox),
                   })
 
-          schema = {"act_id": pl.Utf8, "citer_id": pl.Utf8, "found_in_outgoing": pl.Boolean}
+          schema = {"document_id": pl.Utf8, "citer_id": pl.Utf8, "found_in_outgoing": pl.Boolean}
           pl.DataFrame(rows, schema=schema).write_parquet(f"data/symmetry_shard_{shard}.parquet")
           print(f"shard {shard}: {len(mine)} acts, {len(rows)} incoming edges checked")
           EOF
@@ -196,7 +196,7 @@ jobs:
 
           print("## citation-symmetry")
           print()
-          print(f"- acts with >=1 incoming citation: **{df['act_id'].n_unique()}**")
+          print(f"- acts with >=1 incoming citation: **{df['document_id'].n_unique()}**")
           print(f"- incoming edges checked: **{n}**")
           print(f"- citer pages that failed to fetch (excluded): {unfetched}")
           print(f"- **misses** (incoming edge with NO matching outgoing): **{miss_n}**  ({rate:.3f}%)")
@@ -204,9 +204,9 @@ jobs:
           if miss_n == 0:
               print("All incoming citations have a matching outgoing entry -> outgoing-only loses nothing on this sample.")
           else:
-              print("Examples of misses (act_id <- citer_id where citer's referaPe omits act):")
+              print("Examples of misses (document_id <- citer_id where citer's referaPe omits act):")
               for r in misses.head(15).to_dicts():
-                  print(f"  - {r['act_id']} <- {r['citer_id']}")
+                  print(f"  - {r['document_id']} <- {r['citer_id']}")
           EOF
       - uses: actions/upload-artifact@v7
         with:

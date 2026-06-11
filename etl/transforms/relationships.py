@@ -98,8 +98,11 @@ def derive_edges(source_id: str, affects_html: str | None) -> list[dict]:
     return edges
 
 
-def build_relationships(cache_path: Path = CACHE_PATH, out_path: Path = OUT_PATH) -> int:
+def build_relationships(
+    cache_path: Path | str = CACHE_PATH, out_path: Path | str = OUT_PATH
+) -> int:
     """Parse the relationships cache into the edges parquet. Returns edge count."""
+    cache_path, out_path = Path(cache_path), Path(out_path)
     if not cache_path.exists():
         logger.warning("relationships: no cache present, skipping edges")
         return 0

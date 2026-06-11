@@ -1,40 +1,42 @@
 # Romanian Law Data
 
-Zstd-compressed Parquet exports of the Romanian legal corpus (acts, articles, paragraphs) for use with [DuckDB](https://duckdb.org/). Sourced from [legislatie.just.ro](https://legislatie.just.ro/) (Ministry of Justice) via its public SOAP API.
+Zstd Parquet of the Romanian legal corpus (documents, articles, paragraphs, relationships) for [DuckDB](https://duckdb.org/). From [legislatie.just.ro](https://legislatie.just.ro/) (Ministry of Justice), scraped via the public HTML detail pages.
 
-Automated daily via GitHub Actions. Download from [Releases](https://github.com/scriptogre/romanian-law-data/releases).
+Rebuilt daily by GitHub Actions. Download from [Releases](https://github.com/scriptogre/romanian-law-data/releases).
 
 ## Tables
 
 | Table | Content | Rows |
 |---|---|---|
-| **acte** | One row per act (LEGE, OUG, HG, ORDIN, DECIZIE, …) with metadata + full text | ~187k |
-| **articole** | One row per article (parsed from `acte.content`) | ~993k |
-| **alineate** | One row per paragraph — the finest citation unit (e.g. `art. 188 alin. (1)`) | ~1.96M |
+| **documents** | One row per act (LEGE, OUG, HG, ORDIN, DECIZIE, ...) with metadata + full text | ~187k |
+| **articles** | One row per article, parsed from `documents.content` | ~993k |
+| **paragraphs** | One row per alineat, the finest citation unit (e.g. `art. 188 alin. (1)`) | ~1.96M |
+| **relationships** | One row per directed edge (act → target): `repeals`, `amends`, `suspends`, ... | varies |
 
-Tables use Romanian legal vocabulary (`acte`, `articole`, `alineate`); columns use English SQL convention (`type`, `published_at`, `gazette_number`, …) with Romanian `COMMENT ON` metadata in [`create_views.sql`](create_views.sql).
+English column names (`type`, `document_number`, `published_at`, `gazette_number`, ...) with Romanian `COMMENT ON` metadata in [`create_views.sql`](create_views.sql).
 
 ## Subject lenses
 
-`create_views.sql` also exposes pre-filtered views over `acte` for each canonical code and for jurisprudence:
+`create_views.sql` pre-filters `documents` per canonical code and for case law:
 
 | View | Filters |
 |---|---|
-| `constitutie` | Constituția României (1991, republicată 2003) |
-| `cod_civil` | Legea 287/2009 |
-| `cod_penal` | Legea 286/2009 |
-| `cod_muncii` | Legea 53/2003 (republicată) |
-| `cod_procedura_civila` | Legea 134/2010 (republicată) |
-| `cod_procedura_penala` | Legea 135/2010 |
-| `cod_fiscal` | Legea 227/2015 |
-| `jurisprudenta` | CCR + ÎCCJ decisions |
+| `constitution` | Constituția României (1991, republicată 2003) |
+| `civil_code` | Legea 287/2009 |
+| `penal_code` | Legea 286/2009 |
+| `labor_code` | Legea 53/2003 (republicată) |
+| `civil_procedure_code` | Legea 134/2010 (republicată) |
+| `penal_procedure_code` | Legea 135/2010 |
+| `tax_code` | Legea 227/2015 |
+| `case_law` | CCR + ÎCCJ decisions |
 
 ## Usage
 
+Download the latest release, then point DuckDB at the parquet files:
+
 ```bash
-# Download the latest bundle
-gh release download -R scriptogre/romanian-law-data
-tar xzf laws.tar.gz -C data/
+mkdir -p data
+gh release download -R scriptogre/romanian-law-data --pattern '*.parquet' --pattern 'create_views.sql' --dir data
 ```
 
 ```python
@@ -42,9 +44,9 @@ import duckdb
 conn = duckdb.connect()
 conn.execute(open("data/create_views.sql").read())
 conn.execute("""
-    SELECT act_citation, link, article_citation, content
-    FROM articole
-    WHERE act_id IN (SELECT id FROM cod_penal)
+    SELECT document_citation, link, article_citation, content
+    FROM articles
+    WHERE document_id IN (SELECT id FROM penal_code)
       AND article_number = 188
 """).fetchall()
 ```
@@ -52,22 +54,22 @@ conn.execute("""
 ## Pipeline
 
 ```
-collect.py    SOAP API → data/raw_acts.jsonl
-normalize.py  fix encoding, dedup, extract dates + gazette → stdout
-parse.py      extract articles + alineate                  → stdout
-export.py     write parquet bundle + sha256                ← stdin
+etl.extract documents        sweep /Public/DetaliiDocument/{id} (resumable)
+etl.extract relationships    fetch outgoing actiuni cache (resumable, sharded)
+etl.transform                clean, parse, validate, write parquets, build FTS
 ```
 
-`collect` checkpoints `raw_acts.jsonl` (SOAP is slow + rate-limited, worth caching). `normalize → parse → export` is one pipe — no intermediate JSONL on disk.
+`extract documents` and `extract relationships` checkpoint their progress into release-asset caches (`documents-cache`, `relationships`). The portal throttles per IP (~1 req/s sustained), so both run in CI as sharded matrices across many runners; each run resumes from the cache.
+
+`transform` reads the document cache, runs the cleanup + parse pipeline, validates against Pandera schemas, builds the DuckDB FTS index, and writes the release parquets.
 
 ```bash
 uv sync
-uv run python -m scripts.collect
-uv run python -m scripts.normalize \
-  | uv run python -m scripts.parse \
-  | uv run python -m scripts.export
+uv run python -m etl.extract documents
+uv run python -m etl.extract relationships
+uv run python -m etl.transform
 ```
 
 ## License
 
-The corpus is published by the Romanian Ministry of Justice and is public information. This repository only provides format conversion + pipeline tooling.
+Public corpus from the Romanian Ministry of Justice. This repo provides format conversion + pipeline tooling.

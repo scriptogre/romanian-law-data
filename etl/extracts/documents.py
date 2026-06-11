@@ -274,8 +274,8 @@ async def fetch_chunk(
 ) -> tuple[list[tuple], list[int]]:
     """Fetch a chunk of ids, retrying the throttled ones pass after pass until the run's deadline.
 
-    Returns `(acts, resolved)`:
-      acts     -> `(record, version_rows)` per live id, parsed from the page
+    Returns `(records, resolved)`:
+      records  -> `(record, version_rows)` per live id, parsed from the page
       resolved -> every id given a DEFINITIVE answer (a live act OR a confirmed dead id). Ids still
                   throttling when the deadline hits are NOT resolved; they stay unfetched, resume next run.
 
@@ -283,7 +283,7 @@ async def fetch_chunk(
     doubles (up to MAX) to let it refill; any progress resets it. This settles onto the portal's
     sustainable rate instead of hammering 503s, so a single budgeted run grinds through its whole slice.
     """
-    acts: dict[int, tuple] = {}
+    records: dict[int, tuple] = {}
     resolved: set[int] = set()
     pending = ids
     backoff = THROTTLE_BACKOFF
@@ -295,7 +295,7 @@ async def fetch_chunk(
         retry, progressed = [], False
         for document_id, outcome in outcomes.items():
             if isinstance(outcome, tuple):
-                acts[document_id] = outcome
+                records[document_id] = outcome
                 resolved.add(document_id)
                 progressed = True
             elif outcome == "retry":
@@ -304,7 +304,7 @@ async def fetch_chunk(
                 resolved.add(document_id)
                 progressed = True
         pending = retry
-        logger.info(f"  pass {attempt}: {len(acts)} acts, {len(pending)} throttling")
+        logger.info(f"  pass {attempt}: {len(records)} records, {len(pending)} throttling")
         if not pending:
             break
 
@@ -315,7 +315,7 @@ async def fetch_chunk(
 
     if pending:
         logger.warning(f"  {len(pending)} ids still throttling at the deadline (resume next run)")
-    return [acts[i] for i in sorted(acts)], sorted(resolved)
+    return [records[i] for i in sorted(records)], sorted(resolved)
 
 
 def _is_live(session: requests.Session, document_id: int) -> bool | None:
@@ -524,7 +524,7 @@ def merge() -> None:
                     "--title",
                     "documents sweep cache",
                     "--notes",
-                    "Resumable raw document sweep (raw_documents + raw_versions + swept ids). Rebuilt by sync-documents.",
+                    "Resumable raw document sweep (raw_documents + raw_versions + swept ids). Rebuilt by extract-legislatie-website.",
                 ],
                 check=True,
             )

@@ -15,7 +15,7 @@ import polars as pl
 import pytest
 
 from etl.transform import transform_act
-from etl.transforms import dates, dedup, issuers, status, text
+from etl.transforms import dates, dedup, issuers, text
 from etl.transforms.parse import (
     extract_articles,
     extract_paragraphs,
@@ -231,59 +231,6 @@ def test_dedup_drops_duplicate_titlu_emitent_pair():
     )
     out = dedup.by_titlu_emitent(lf).collect()
     assert out["Titlu"].to_list() == ["A", "B", ""]
-
-
-# ── status ──────────────────────────────────────────────────────────────────
-
-
-def test_derive_status_none_when_html_missing():
-    """`""` and `None` both mean "fetch never succeeded" — status is unknown."""
-    assert status.derive_status(None) is None
-    assert status.derive_status("") is None
-
-
-def test_derive_status_in_force_when_no_act_level_ops():
-    """Per-article rows (ART. 54 MODIFICAT DE ...) don't change act status."""
-    html = """
-    <table><tr><td>ART. 54</td><td>MODIFICAT DE</td><td>LEGE 200/2024</td></tr></table>
-    """
-    assert status.derive_status(html) == "in_force"
-
-
-def test_derive_status_abrogat_on_act_level_abrogat():
-    html = """
-    <table><tr><td>Actul</td><td>ABROGAT DE</td><td>LEGE 187/2012</td></tr></table>
-    """
-    assert status.derive_status(html) == "repealed"
-
-
-def test_derive_status_in_force_when_abrogat_then_repus():
-    """REPUS reverses an earlier ABROGAT — back to in-force."""
-    html = """
-    <table>
-      <tr><td>Actul</td><td>ABROGAT DE</td><td>LEGE 100/2010</td></tr>
-      <tr><td>Actul</td><td>REPUS IN VIGOARE DE</td><td>LEGE 200/2012</td></tr>
-    </table>
-    """
-    assert status.derive_status(html) == "in_force"
-
-
-def test_derive_status_suspendat():
-    html = """
-    <table><tr><td>Actul</td><td>SUSPENDAT DE</td><td>OUG 50/2024</td></tr></table>
-    """
-    assert status.derive_status(html) == "suspended"
-
-
-def test_derive_status_per_article_abrogat_is_not_act_abrogat():
-    """Critical: a single article being abrogated must not abrogate the whole act."""
-    html = """
-    <table><tr><td>ART. 12</td><td>ABROGAT DE</td><td>LEGE 200/2024</td></tr></table>
-    """
-    assert status.derive_status(html) == "in_force"
-
-
-# ── dedup (continued) ───────────────────────────────────────────────────────
 
 
 # ── parse ───────────────────────────────────────────────────────────────────

@@ -1,15 +1,13 @@
-# Local development loop. Three tiers of feedback speed.
+# Local development loop.
 #
-#   just test            — unit tests on hand-picked fixtures (<1 sec)
-#   just smoke           — full pipeline on 1000 cached raw acts (~3 sec)
-#   just local           — full pipeline on entire local cache (~5-10 min)
-#   just extract         — one-time API fetch into data/raw_acts.jsonl (~30 min)
+#   just test     — unit tests on hand-picked fixtures (<1 sec)
+#   just local    — full pipeline on data/raw_documents/*.parquet (~5-10 min)
+#   just extract  — sweep the portal into data/raw_documents/ (slow; CI shards it)
 #
-# Workflow once the cache exists:
-#   1. edit transform.py / load.py / lookup yaml
-#   2. just test         (locks rule-level behaviour)
-#   3. just smoke        (sanity-check end-to-end)
-#   4. just local        (full verify before committing)
+# `just local` needs data/raw_documents/*.parquet. Get them from the
+# documents-cache release (raw_documents.parquet) or by running `just extract`.
+# Edit-test loop: edit transform.py / load.py / lookup yaml, then `just test`,
+# then `just local` to verify end-to-end before committing.
 
 default:
     @just --list
@@ -18,31 +16,11 @@ default:
 test:
     uv run pytest -q
 
-# One-time API fetch. Don't run unless you really need fresh raw data.
+# Sweep /Public/DetaliiDocument/{id} into data/raw_documents/*.parquet.
+# One IP, rate-limited — a long job locally; CI shards it across runners.
 extract:
-    uv run python -m etl.extract
+    uv run python -m etl.extract documents
 
-# Smoke run: head -N from data/raw_acts.jsonl. Backs up the full cache,
-# swaps in the head, runs the merged pipeline, restores the cache.
-smoke n="1000":
-    cp data/raw_acts.jsonl /tmp/raw_acts_full_backup.jsonl
-    head -{{n}} data/raw_acts.jsonl > /tmp/raw_acts_smoke.jsonl
-    mv /tmp/raw_acts_smoke.jsonl data/raw_acts.jsonl
-    uv run python -m etl.transform
-    mv /tmp/raw_acts_full_backup.jsonl data/raw_acts.jsonl
-
-# Full local pipeline run. Cleanup + parse + parquet + validate + FTS, one process.
+# Full local pipeline: cleanup + parse + parquet + Pandera + FTS, one process.
 local:
     uv run python -m etl.transform
-
-# Audit the current parquet bundle via DuckDB.
-audit:
-    uv run python -c "import duckdb; c = duckdb.connect(); \
-        print('acte:    ', c.execute(\"SELECT count(*) FROM read_parquet('data/acte.parquet')\").fetchone()[0]); \
-        print('articole:', c.execute(\"SELECT count(*) FROM read_parquet('data/articole.parquet')\").fetchone()[0]); \
-        print('alineate:', c.execute(\"SELECT count(*) FROM read_parquet('data/alineate.parquet')\").fetchone()[0])"
-
-# Wipe the local build outputs (keeps raw_acts.jsonl).
-clean:
-    rm -f data/acte.parquet data/articole.parquet data/alineate.parquet
-    rm -f data/fts.duckdb data/laws.sha256 data/parse_report.jsonl

@@ -106,7 +106,7 @@ PARAGRAPHS_SCHEMA = pa.schema(
     ]
 )
 
-BATCH_ACTS = 2_000
+BATCH_DOCUMENTS = 2_000
 BATCH_ARTICLES = 10_000
 BATCH_PARAGRAPHS = 50_000
 
@@ -172,7 +172,7 @@ def _flush(writer: pq.ParquetWriter, rows: list[dict], schema: pa.Schema) -> Non
 
 
 def write_parquets(parsed_iter: Iterable[dict]) -> tuple[int, int, int]:
-    """Stream parsed records into 3 parquet files. Returns (n_acts, n_articles, n_paragraphs).
+    """Stream parsed records into 3 parquet files. Returns (n_documents, n_articles, n_paragraphs).
 
     `parsed_iter` is any iterable of dicts shaped:
         {
@@ -187,13 +187,13 @@ def write_parquets(parsed_iter: Iterable[dict]) -> tuple[int, int, int]:
     synced_at = datetime.now(UTC).replace(tzinfo=None)
 
     next_document_id = next_article_id = next_paragraph_id = 1
-    n_acts = n_articles = n_paragraphs = 0
-    act_buf: list[dict] = []
+    n_documents = n_articles = n_paragraphs = 0
+    document_buf: list[dict] = []
     article_buf: list[dict] = []
     paragraph_buf: list[dict] = []
 
     with (
-        pq.ParquetWriter(DOCUMENTS_PATH, DOCUMENTS_SCHEMA, compression="zstd") as acts_writer,
+        pq.ParquetWriter(DOCUMENTS_PATH, DOCUMENTS_SCHEMA, compression="zstd") as documents_writer,
         pq.ParquetWriter(ARTICLES_PATH, ARTICLES_SCHEMA, compression="zstd") as articles_writer,
         pq.ParquetWriter(
             PARAGRAPHS_PATH, PARAGRAPHS_SCHEMA, compression="zstd"
@@ -210,7 +210,7 @@ def write_parquets(parsed_iter: Iterable[dict]) -> tuple[int, int, int]:
             issuer = raw.get("Emitent")
             adopted_at = _parse_date(raw.get("AdoptedAt"))
 
-            act_buf.append(
+            document_buf.append(
                 {
                     "id": document_id,
                     "type": type_,
@@ -230,7 +230,7 @@ def write_parquets(parsed_iter: Iterable[dict]) -> tuple[int, int, int]:
                     "synced_at": synced_at,
                 }
             )
-            n_acts += 1
+            n_documents += 1
 
             # transform emits internal article keys (`number`, `number_variant`,
             # `full_path`); map them to the level-prefixed schema names.
@@ -262,24 +262,24 @@ def write_parquets(parsed_iter: Iterable[dict]) -> tuple[int, int, int]:
                     next_paragraph_id += 1
                     n_paragraphs += 1
 
-            if len(act_buf) >= BATCH_ACTS:
-                _flush(acts_writer, act_buf, DOCUMENTS_SCHEMA)
+            if len(document_buf) >= BATCH_DOCUMENTS:
+                _flush(documents_writer, document_buf, DOCUMENTS_SCHEMA)
             if len(article_buf) >= BATCH_ARTICLES:
                 _flush(articles_writer, article_buf, ARTICLES_SCHEMA)
             if len(paragraph_buf) >= BATCH_PARAGRAPHS:
                 _flush(paragraphs_writer, paragraph_buf, PARAGRAPHS_SCHEMA)
 
-            if n_acts % 10_000 == 0:
+            if n_documents % 10_000 == 0:
                 logger.info(
-                    f"load: progress  documents={n_acts:>7d}  "
+                    f"load: progress  documents={n_documents:>7d}  "
                     f"articles={n_articles:>8d}  paragraphs={n_paragraphs:>9d}"
                 )
 
-        _flush(acts_writer, act_buf, DOCUMENTS_SCHEMA)
+        _flush(documents_writer, document_buf, DOCUMENTS_SCHEMA)
         _flush(articles_writer, article_buf, ARTICLES_SCHEMA)
         _flush(paragraphs_writer, paragraph_buf, PARAGRAPHS_SCHEMA)
 
-    return n_acts, n_articles, n_paragraphs
+    return n_documents, n_articles, n_paragraphs
 
 
 def build_fts_index() -> None:

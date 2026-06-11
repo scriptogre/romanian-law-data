@@ -238,7 +238,7 @@ def merge() -> None:
         if not exists:
             subprocess.run(
                 ["gh", "release", "create", RELEASE_TAG, "--title", "relationships cache",
-                 "--notes", "Per-act relationship HTML from legislatie.just.ro /Public. Rebuilt by sync-relationships."],
+                 "--notes", "Per-act relationship HTML from legislatie.just.ro /Public. Rebuilt by extract-legislatie-relations."],
                 check=True,
             )
         subprocess.run(["gh", "release", "upload", RELEASE_TAG, str(CACHE_PATH), "--clobber"], check=True)

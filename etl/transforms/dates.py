@@ -189,12 +189,3 @@ def clamp_far_future(lf: pl.LazyFrame) -> pl.LazyFrame:
     )
 
 
-def null_sentinel_pubdates(lf: pl.LazyFrame) -> pl.LazyFrame:
-    """Null PublishedAt if its year matches a known sentinel placeholder."""
-    year_prefixes = [f"{y}-" for y in SENTINEL_PUB_YEARS]
-    return lf.with_columns(
-        pl.when(pl.col("PublishedAt").str.slice(0, 5).is_in(year_prefixes))
-        .then(None)
-        .otherwise(pl.col("PublishedAt"))
-        .alias("PublishedAt")
-    )
