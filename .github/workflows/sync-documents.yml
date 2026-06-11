@@ -188,6 +188,18 @@ jobs:
           large-packages: true
           swap-storage: false
 
+      # The corpus body text is ~9 GB uncompressed and growing; transform holds it
+      # in RAM and peaks over the 16 GB runner, OOM-killing the runner (which also
+      # destroys the logs). Back RAM with disk swap on the roomy /mnt volume so cold
+      # pages page out instead of the kernel killing us, and failures stay loggable.
+      - name: Add swap
+        run: |
+          sudo fallocate -l 24G /mnt/swapfile
+          sudo chmod 600 /mnt/swapfile
+          sudo mkswap /mnt/swapfile
+          sudo swapon /mnt/swapfile
+          free -h
+
       - uses: actions/checkout@v6
       - uses: astral-sh/setup-uv@v8.1.0
         with:
