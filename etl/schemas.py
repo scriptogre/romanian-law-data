@@ -31,7 +31,7 @@ class Documents(pa.DataFrameModel):
     type: str
     document_number: str = pa.Field(nullable=True)
     document_citation: str
-    issuer: str
+    issuer: str = pa.Field(nullable=True)
     title: str
     adopted_at: date = pa.Field(nullable=True)
     published_at: date = pa.Field(nullable=True)
@@ -93,7 +93,7 @@ def check_referential_integrity(
         )
 
 
-def validate_parquets(acts_path: Path, articles_path: Path, paragraphs_path: Path) -> None:
+def validate_parquets(documents_path: Path, articles_path: Path, paragraphs_path: Path) -> None:
     """Validate the three written parquets against the schemas + FK integrity.
 
     Pandera Polars needs an eager DataFrame to validate, but the `content`
@@ -104,15 +104,15 @@ def validate_parquets(acts_path: Path, articles_path: Path, paragraphs_path: Pat
     ValueError on FK violations.
     """
     logger.info("schemas: validating parquets...")
-    acts = pl.scan_parquet(acts_path).drop("content").collect()
+    documents = pl.scan_parquet(documents_path).drop("content").collect()
     articles = pl.scan_parquet(articles_path).drop("content").collect()
     paragraphs = pl.scan_parquet(paragraphs_path).drop("content").collect()
 
-    Documents.validate(acts, lazy=True)
+    Documents.validate(documents, lazy=True)
     Articles.validate(articles, lazy=True)
     Paragraphs.validate(paragraphs, lazy=True)
-    check_referential_integrity(acts, articles, paragraphs)
+    check_referential_integrity(documents, articles, paragraphs)
     logger.success(
-        f"schemas: OK — {acts.height} documents / {articles.height} articles / "
+        f"schemas: OK: {documents.height} documents / {articles.height} articles / "
         f"{paragraphs.height} paragraphs"
     )
