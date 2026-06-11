@@ -194,10 +194,12 @@ jobs:
       # pages page out instead of the kernel killing us, and failures stay loggable.
       - name: Add swap
         run: |
-          sudo fallocate -l 24G /mnt/swapfile
-          sudo chmod 600 /mnt/swapfile
-          sudo mkswap /mnt/swapfile
-          sudo swapon /mnt/swapfile
+          # Runner already ships an active /mnt/swapfile; use a distinct path so
+          # fallocate doesn't hit "Text file busy" on the in-use swap file.
+          sudo fallocate -l 24G /mnt/swapfile-etl
+          sudo chmod 600 /mnt/swapfile-etl
+          sudo mkswap /mnt/swapfile-etl
+          sudo swapon /mnt/swapfile-etl
           free -h
 
       - uses: actions/checkout@v6
