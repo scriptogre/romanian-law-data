@@ -8,8 +8,11 @@ name: sync-relationships
 # each round fetches only still-uncached acts, so re-dispatch until REMAINING=0.
 #
 # Backfill: dispatch mode=backfill. Nightly: delta (new + reconcile).
-# TODO downstream (needs parsers + cache wired into transform):
-#   affected_by_html -> status / in_force_until; affects_html -> relationship edges.
+#
+# Downstream wiring: affects_html parses into the `relationships` edges table
+# (etl/transforms/relationships.py). Status is planned as a view derived from
+# incoming edges (see docs/design.md "Parked & next"); the cache stores
+# outgoing only and does not currently fetch affected_by_html.
 
 on:
   schedule:
@@ -71,7 +74,10 @@ jobs:
         run: |
           mkdir -p data
           LATEST=$(gh release list --json tagName --jq '[.[] | select(.tagName | startswith("laws/"))][0].tagName')
-          gh release download "$LATEST" --pattern 'documents.parquet' --dir data
+          # Tolerate the corpus rename transition: prefer documents.parquet, fall back to legacy acte.parquet.
+          # extracts/relationships.py only reads the `link` column, which exists under both names.
+          gh release download "$LATEST" --pattern 'documents.parquet' --dir data 2>/dev/null \
+            || { gh release download "$LATEST" --pattern 'acte.parquet' --dir data && mv data/acte.parquet data/documents.parquet; }
           gh release download relationships --pattern 'raw_relationships.parquet' --dir data || echo "no cache yet"
       - name: Extract shard
         run: uv run python -m etl.extract relationships
@@ -99,7 +105,8 @@ jobs:
         run: |
           mkdir -p data
           LATEST=$(gh release list --json tagName --jq '[.[] | select(.tagName | startswith("laws/"))][0].tagName')
-          gh release download "$LATEST" --pattern 'documents.parquet' --dir data
+          gh release download "$LATEST" --pattern 'documents.parquet' --dir data 2>/dev/null \
+            || { gh release download "$LATEST" --pattern 'acte.parquet' --dir data && mv data/acte.parquet data/documents.parquet; }
           gh release download relationships --pattern 'raw_relationships.parquet' --dir data || echo "first round, no cache"
       - uses: actions/download-artifact@v6
         with:
