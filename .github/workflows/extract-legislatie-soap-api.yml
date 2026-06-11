@@ -1,0 +1,24 @@
+name: extract-legislatie-soap-api
+
+# NOT YET IMPLEMENTED. Planned L1 source: the SOAP Search API (GetToken +
+# Search), the only place the TRUE entry-into-force date (DataVigoare) and the
+# clean type/number/issuer fields live. SOAP cannot enumerate, so it is driven
+# per-act off the website id sweep, and it is flaky (needs retries). Built after
+# the verbatim website + relations L1 is solid. See docs/sources.md.
+#
+# Manual-only (no schedule) so it never runs or fails on cron until implemented.
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  noop:
+    runs-on: ubuntu-latest
+    steps:
+      - run: |
+          echo "extract-legislatie-soap-api is not implemented yet."
+          echo "See docs/sources.md (SOAP surface) and docs/version-model.md (DataVigoare)."
+          exit 1

@@ -1,4 +1,4 @@
-name: sync-documents
+name: extract-legislatie-website
 
 # Builds the legal corpus release by sweeping the document-id space and reading each act's
 # /Public/DetaliiDocument/{id} page (the SOAP Search API drops ~1/3 of acts; see extracts/documents.py).

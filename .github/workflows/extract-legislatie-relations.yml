@@ -1,4 +1,4 @@
-name: sync-relationships
+name: extract-legislatie-relations
 
 # Builds/refreshes the durable relationships cache (a release asset) via
 # `etl/extracts/relationships.py`. legislatie.just.ro throttles per IP (a few
