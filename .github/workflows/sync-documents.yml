@@ -227,8 +227,14 @@ jobs:
         run: |
           cp create_views.sql data/create_views.sql
           cd data
+          # GitHub caps each release asset at 2 GiB. Compress the FTS index, then
+          # split into <2 GiB parts. Always split (even a single part) so the
+          # consumer reassembly is uniform regardless of size:
+          #   cat fts.duckdb.zst.part-* | zstd -d -o fts.duckdb
           zstd -3 -f --quiet --rm fts.duckdb -o fts.duckdb.zst
-          sha256sum documents.parquet articles.parquet paragraphs.parquet relationships.parquet raw_documents.parquet raw_versions.parquet fts.duckdb.zst create_views.sql > laws.sha256
+          split -b 1900M -d -a 2 fts.duckdb.zst fts.duckdb.zst.part-
+          rm fts.duckdb.zst
+          sha256sum documents.parquet articles.parquet paragraphs.parquet relationships.parquet raw_documents.parquet raw_versions.parquet fts.duckdb.zst.part-* create_views.sql > laws.sha256
           TAG="${{ inputs.release_tag }}"; [ -z "$TAG" ] && TAG="laws/$(date -u +%Y-%m-%d)"
           echo "tag=$TAG" >> "$GITHUB_OUTPUT"
 
@@ -274,7 +280,7 @@ jobs:
 
           cd data
           gh release create "$TAG" $PRERELEASE \
-            documents.parquet articles.parquet paragraphs.parquet relationships.parquet raw_documents.parquet raw_versions.parquet fts.duckdb.zst create_views.sql laws.sha256 \
+            documents.parquet articles.parquet paragraphs.parquet relationships.parquet raw_documents.parquet raw_versions.parquet fts.duckdb.zst.part-* create_views.sql laws.sha256 \
             --title "$TAG" \
             --notes "$(cat <<EOF
           Romanian legal corpus snapshot.
@@ -282,6 +288,9 @@ jobs:
           Last published act: ${{ steps.stats.outputs.latest }}
 
           Counts: ${{ steps.stats.outputs.documents }} documents, ${{ steps.stats.outputs.articles }} articles, ${{ steps.stats.outputs.paragraphs }} paragraphs
+
+          Full-text search index is split to fit GitHub's 2 GiB asset cap. Reassemble:
+          cat fts.duckdb.zst.part-* | zstd -d -o fts.duckdb
           EOF
           )"
 
