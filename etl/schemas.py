@@ -74,10 +74,10 @@ def validate_relationships(path: Path) -> None:
 
 
 def check_referential_integrity(
-    acts: pl.DataFrame, articles: pl.DataFrame, paragraphs: pl.DataFrame
+    documents: pl.DataFrame, articles: pl.DataFrame, paragraphs: pl.DataFrame
 ) -> None:
     """All FK references must resolve. Raises `ValueError` listing the orphans."""
-    document_ids = set(acts["id"].to_list())
+    document_ids = set(documents["id"].to_list())
     orphan_articles = articles.filter(~pl.col("document_id").is_in(list(document_ids)))
     if orphan_articles.height:
         raise ValueError(

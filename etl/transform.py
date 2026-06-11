@@ -86,7 +86,7 @@ def cleanup(lf: pl.LazyFrame) -> pl.LazyFrame:
     )
 
 
-def parse_act(cleaned: dict) -> dict:
+def parse_document(cleaned: dict) -> dict:
     """Split one cleaned act into articles + paragraphs + quality.
 
     `cleaned` is a row from the cleanup LazyFrame — keys mirror the
@@ -116,13 +116,13 @@ def parse_act(cleaned: dict) -> dict:
     return {"raw": cleaned, "articles": articles, "quality": quality}
 
 
-def transform_act(raw_act: dict) -> dict:
+def transform_document(raw_document: dict) -> dict:
     """End-to-end transform on a single raw SOAP dict. Used by tests."""
-    lf = pl.LazyFrame([raw_act])
+    lf = pl.LazyFrame([raw_document])
     cleaned_rows = cleanup(lf).collect().to_dicts()
     if not cleaned_rows:
-        return {"raw": raw_act, "articles": [], "quality": None}
-    return parse_act(cleaned_rows[0])
+        return {"raw": raw_document, "articles": [], "quality": None}
+    return parse_document(cleaned_rows[0])
 
 
 def _parsed_records(
@@ -137,7 +137,7 @@ def _parsed_records(
         if i % 10_000 == 0:
             avg = scoresum[0] / i
             logger.info(
-                f"parse: progress acts={i:>7d}  "
+                f"parse: progress documents={i:>7d}  "
                 f"high={bands['high']:>5d}  med={bands['medium']:>4d}  "
                 f"low={bands['low']:>4d}  fallback={bands['intentional-fallback']:>5d}  "
                 f"mean_score={avg:.3f}"
@@ -179,7 +179,7 @@ def main() -> None:
     lf = pl.scan_parquet(INPUT_DIR / "*.parquet")
     df = cleanup(lf).collect(engine="streaming")
     n_unique = df.height
-    logger.info(f"cleanup: done — {n_unique} unique acts (post-dedup)")
+    logger.info(f"cleanup: done. {n_unique} unique documents (post-dedup)")
 
     bands: Counter[str] = Counter()
     gates: Counter[str] = Counter()
@@ -193,7 +193,7 @@ def main() -> None:
         # next slice's map only once the current slice drains, so the pool never
         # holds more than PARSE_BATCH rows of pickled tasks at a time.
         parsed_iter = chain.from_iterable(
-            pool.map(parse_act, batch.iter_rows(named=True), chunksize=PARSE_CHUNKSIZE)
+            pool.map(parse_document, batch.iter_rows(named=True), chunksize=PARSE_CHUNKSIZE)
             for batch in df.iter_slices(PARSE_BATCH)
         )
         n_documents, n_articles, n_paragraphs = write_parquets(

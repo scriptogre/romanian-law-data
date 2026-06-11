@@ -44,7 +44,7 @@ SELECT
     gazette_number,
     status,
     link
-FROM read_parquet('data/laws/documents.parquet');
+FROM read_parquet('data/documents.parquet');
 
 COMMENT ON VIEW documents IS
 'Acte normative din corpusul juridic român. Sursa: legislatie.just.ro (Ministerul Justiției). Un rând per act distinct. Acoperă LEGI, ORDONANȚE (OUG, OG), HOTĂRÂRI DE GUVERN (HG), ORDINE ministeriale, DECRETE prezidențiale, DECIZII și HOTĂRÂRI ale Curții Constituționale (CCR) și ÎCCJ, plus documente conexe (RAPORT, COMUNICAT, RECTIFICARE, CUANTUM TOTAL) și codurile (CODUL CIVIL, CODUL PENAL, CONSTITUȚIE, etc.). Pentru regăsire la nivel de articol sau alineat, NU JOIN-ui manual cu articles / paragraphs — interoghează direct view-urile articles / paragraphs, care includ deja contextul actului (document_citation, link).';
@@ -104,14 +104,14 @@ SELECT
     ar.article_variant,
     ar.article_citation,
     ar.content
-FROM read_parquet('data/laws/articles.parquet') ar
-JOIN read_parquet('data/laws/documents.parquet') a ON a.id = ar.document_id;
+FROM read_parquet('data/articles.parquet') ar
+JOIN read_parquet('data/documents.parquet') a ON a.id = ar.document_id;
 
 COMMENT ON VIEW articles IS
 'Articolele extrase din fiecare act. Un rând per articol. Vine JOIN-uit deja cu actul-părinte: document_citation și link sunt incluse direct, nu trebuie să faci JOIN cu documents. Pentru actele care nu sunt structurate pe articole (decizii, comunicate, rapoarte), un singur rând cu article_number IS NULL și content egal cu textul întreg al actului. Pentru regăsire la nivel de alineat folosește view-ul paragraphs.';
 
 COMMENT ON COLUMN articles.id IS
-'Cheie primară surogat. Referită de paragraphs.article_id (intern, deja JOIN-uit în view-ul alineate).';
+'Cheie primară surogat. Referită de paragraphs.article_id (intern, deja JOIN-uit în view-ul paragraphs).';
 
 COMMENT ON COLUMN articles.document_id IS
 'FK către documents.id. Folosește-o pentru a restrânge la articolele unui anume act, ex: `WHERE document_id IN (SELECT id FROM penal_code)`.';
@@ -156,9 +156,9 @@ SELECT
     al.paragraph_number,
     al.paragraph_citation,
     al.content
-FROM read_parquet('data/laws/paragraphs.parquet') al
-JOIN read_parquet('data/laws/articles.parquet') ar ON ar.id = al.article_id
-JOIN read_parquet('data/laws/documents.parquet') a ON a.id = ar.document_id;
+FROM read_parquet('data/paragraphs.parquet') al
+JOIN read_parquet('data/articles.parquet') ar ON ar.id = al.article_id
+JOIN read_parquet('data/documents.parquet') a ON a.id = ar.document_id;
 
 COMMENT ON VIEW paragraphs IS
 'Alineatele extrase din fiecare articol. Un rând per alineat. ACEASTA ESTE UNITATEA CEA MAI FINĂ DE CITARE — corespunde cu "art. 188 alin. (1)" din practica juridică. Vine JOIN-uit deja cu actul-părinte și articolul-părinte: document_citation, link și article_citation sunt incluse direct. Pentru articolele monolitice (fără alineate distincte (1), (2), (3) ...), conține un singur rând cu paragraph_number IS NULL și content egal cu articolul întreg.';

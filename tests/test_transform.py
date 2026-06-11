@@ -8,13 +8,13 @@ Tests target two layers:
     - LazyFrame transforms — verify Polars pipeline produces expected output
       on a small in-memory frame built from one fixture.
 
-The orchestrator's end-to-end `transform_act(raw_dict)` exercises both.
+The orchestrator's end-to-end `transform_document(raw_dict)` exercises both.
 """
 
 import polars as pl
 import pytest
 
-from etl.transform import transform_act
+from etl.transform import transform_document
 from etl.transforms import dates, dedup, issuers, text
 from etl.transforms.parse import (
     extract_articles,
@@ -323,100 +323,100 @@ def test_roman_to_int_compound():
     assert roman_to_int("IX") == 9
 
 
-# ── End-to-end via transform_act on real SOAP fixtures ─────────────────────
+# ── End-to-end via transform_document on real SOAP fixtures ─────────────────────
 
 
-def test_cedilla_translated_end_to_end(raw_acts):
-    out = transform_act(raw_acts["lege_cedilla_in_titlu"])
+def test_cedilla_translated_end_to_end(raw_documents):
+    out = transform_document(raw_documents["lege_cedilla_in_titlu"])
     assert "ţ" not in out["raw"]["Titlu"]
     assert "ş" not in out["raw"]["Titlu"]
     assert "Ordonanței de urgență" in out["raw"]["Titlu"]
 
 
-def test_legacy_cedilla_in_text_translated(raw_acts):
-    out = transform_act(raw_acts["decret_2005_legacy_text"])
+def test_legacy_cedilla_in_text_translated(raw_documents):
+    out = transform_document(raw_documents["decret_2005_legacy_text"])
     assert "Ş" not in out["raw"]["Text"]
     assert "Ș" in out["raw"]["Text"]
 
 
-def test_question_mark_in_emitent_recovered(raw_acts):
-    out = transform_act(raw_acts["decizie_ccr_question_mark"])
+def test_question_mark_in_emitent_recovered(raw_documents):
+    out = transform_document(raw_documents["decizie_ccr_question_mark"])
     assert out["raw"]["Emitent"] == "CURTEA CONSTITUȚIONALĂ"
 
 
-def test_question_mark_in_emitent_recovered_for_courts(raw_acts):
-    out = transform_act(raw_acts["sentinta_court_capital_T"])
+def test_question_mark_in_emitent_recovered_for_courts(raw_documents):
+    out = transform_document(raw_documents["sentinta_court_capital_T"])
     assert "?" not in out["raw"]["Emitent"]
     assert "IAȘI" in out["raw"]["Emitent"]
 
 
-def test_emitent_uppercased_from_titlecase(raw_acts):
-    out = transform_act(raw_acts["oug_caret_article_variant"])
+def test_emitent_uppercased_from_titlecase(raw_documents):
+    out = transform_document(raw_documents["oug_caret_article_variant"])
     assert out["raw"]["Emitent"] == "GUVERNUL"
 
 
-def test_emitent_diacritics_preserved_through_uppercasing(raw_acts):
-    out = transform_act(raw_acts["sentinta_court_capital_T"])
+def test_emitent_diacritics_preserved_through_uppercasing(raw_documents):
+    out = transform_document(raw_documents["sentinta_court_capital_T"])
     assert "Ș" in out["raw"]["Emitent"]
     assert "Ț" in out["raw"]["Emitent"]
 
 
-def test_joint_issuers_separated_by_slash(raw_acts):
-    out = transform_act(raw_acts["norma_joint_issuer"])
+def test_joint_issuers_separated_by_slash(raw_documents):
+    out = transform_document(raw_documents["norma_joint_issuer"])
     parts = out["raw"]["Emitent"].split(" / ")
     assert len(parts) >= 2
     assert all("MINISTERUL" in p for p in parts)
 
 
-def test_titlu_emitent_suffix_stripped(raw_acts):
-    out = transform_act(raw_acts["lege_cedilla_in_titlu"])
+def test_titlu_emitent_suffix_stripped(raw_documents):
+    out = transform_document(raw_documents["lege_cedilla_in_titlu"])
     assert "EMITENT" not in out["raw"]["Titlu"]
 
 
-def test_bom_stripped_from_titlu(raw_acts):
-    out = transform_act(raw_acts["hotarare_camera_with_bom"])
+def test_bom_stripped_from_titlu(raw_documents):
+    out = transform_document(raw_documents["hotarare_camera_with_bom"])
     assert "﻿" not in out["raw"]["Titlu"]
 
 
-def test_numar_zero_becomes_null(raw_acts):
-    out = transform_act(raw_acts["raport_numar_zero"])
+def test_numar_zero_becomes_null(raw_documents):
+    out = transform_document(raw_documents["raport_numar_zero"])
     assert out["raw"]["Numar"] is None
 
 
-def test_real_numar_preserved(raw_acts):
-    out = transform_act(raw_acts["lege_cedilla_in_titlu"])
+def test_real_numar_preserved(raw_documents):
+    out = transform_document(raw_documents["lege_cedilla_in_titlu"])
     assert out["raw"]["Numar"] == "87"
 
 
-def test_three_dates_extracted(raw_acts):
-    out = transform_act(raw_acts["lege_cedilla_in_titlu"])["raw"]
+def test_three_dates_extracted(raw_documents):
+    out = transform_document(raw_documents["lege_cedilla_in_titlu"])["raw"]
     assert out["AdoptedAt"] == "2026-05-28"
     assert out["PublishedAt"] is not None
     assert out["EffectiveAt"] == "2026-05-31"
     assert out["GazetteNumber"] is not None
 
 
-def test_gazette_parsed_from_text(raw_acts):
-    out = transform_act(raw_acts["decret_articol_unic"])["raw"]
+def test_gazette_parsed_from_text(raw_documents):
+    out = transform_document(raw_documents["decret_articol_unic"])["raw"]
     assert out["PublishedAt"] == "2026-05-29"
     assert out["GazetteNumber"] == 457
 
 
-def test_articol_unic_decret_parses_as_single_article(raw_acts):
-    out = transform_act(raw_acts["decret_articol_unic"])
+def test_articol_unic_decret_parses_as_single_article(raw_documents):
+    out = transform_document(raw_documents["decret_articol_unic"])
     assert len(out["articles"]) == 1
     assert out["articles"][0]["full_path"] == "Articol unic"
     assert out["articles"][0]["number"] is None
 
 
-def test_narrative_comunicat_falls_back(raw_acts):
-    out = transform_act(raw_acts["comunicat_narrative"])
+def test_narrative_comunicat_falls_back(raw_documents):
+    out = transform_document(raw_documents["comunicat_narrative"])
     assert out["articles"][0]["full_path"] == "(unparsed)"
     assert out["quality"]["band"] == "intentional-fallback"
 
 
-def test_transform_act_returns_full_shape(raw_acts):
-    out = transform_act(raw_acts["oug_caret_article_variant"])
+def test_transform_document_returns_full_shape(raw_documents):
+    out = transform_document(raw_documents["oug_caret_article_variant"])
     assert set(out) == {"raw", "articles", "quality"}
     assert out["raw"]["Numar"] == "11"
     assert out["raw"]["Emitent"] == "GUVERNUL"
@@ -439,13 +439,13 @@ def test_transform_act_returns_full_shape(raw_acts):
         "comunicat_narrative",
     ],
 )
-def test_every_fixture_round_trips_without_exception(raw_acts, fixture_id):
+def test_every_fixture_round_trips_without_exception(raw_documents, fixture_id):
     """Every real fixture must complete cleanup + parse without raising.
 
     Catches edge cases that crash silently or partially. If a new pathological
     SOAP shape lands in the corpus, add it as a fixture and this test fails.
     """
-    out = transform_act(raw_acts[fixture_id])
+    out = transform_document(raw_documents[fixture_id])
     assert out["raw"]["Titlu"]
     assert out["raw"]["Text"]
     assert len(out["articles"]) >= 1

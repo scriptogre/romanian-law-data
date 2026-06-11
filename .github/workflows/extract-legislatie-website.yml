@@ -8,7 +8,7 @@ name: extract-legislatie-website
 # durable `documents-cache` prerelease (raw_documents + raw_versions + swept ids — swept includes dead
 # ids, so coverage can actually reach 100%). `prepare` diffs swept against the id range to get the
 # remaining ids; shards sweep their slice; `merge` folds parts back into the cache and reports REMAINING.
-# `publish` ships laws/<date> only once REMAINING is ~0. The nightly cron resumes where the last run
+# `publish` ships documents/<date> only once REMAINING is ~0. The nightly cron resumes where the last run
 # stopped; once complete it just picks up newly-published ids. No single run ever needs to (or can) finish.
 
 on:
@@ -26,7 +26,7 @@ on:
         description: "Pin the top of the id sweep. Empty = auto-discover (default)."
         default: ""
       release_tag:
-        description: "Publish corpus to this tag instead of laws/<date> (e.g. smoke/2026-06-04)."
+        description: "Publish corpus to this tag instead of documents/<date> (e.g. smoke/2026-06-04)."
         default: ""
       cache_tag:
         description: "Durable sweep-cache release. Use a throwaway tag for smokes."
@@ -236,18 +236,18 @@ jobs:
           zstd -3 -f --quiet --rm fts.duckdb -o fts.duckdb.zst
           split -b 1900M -d -a 2 fts.duckdb.zst fts.duckdb.zst.part-
           rm fts.duckdb.zst
-          sha256sum documents.parquet articles.parquet paragraphs.parquet relationships.parquet raw_documents.parquet raw_versions.parquet fts.duckdb.zst.part-* create_views.sql > laws.sha256
-          TAG="${{ inputs.release_tag }}"; [ -z "$TAG" ] && TAG="laws/$(date -u +%Y-%m-%d)"
+          sha256sum documents.parquet articles.parquet paragraphs.parquet relationships.parquet raw_documents.parquet raw_versions.parquet fts.duckdb.zst.part-* create_views.sql > documents.sha256
+          TAG="${{ inputs.release_tag }}"; [ -z "$TAG" ] && TAG="documents/$(date -u +%Y-%m-%d)"
           echo "tag=$TAG" >> "$GITHUB_OUTPUT"
 
       - name: Check whether manifest changed vs latest release
         id: digest_check
         run: |
           if [ -n "${{ inputs.release_tag }}" ]; then echo "unchanged=false" >> "$GITHUB_OUTPUT"; exit 0; fi
-          LATEST_URL=$(gh release view --json assets --jq '.assets[] | select(.name=="laws.sha256") | .url' 2>/dev/null || true)
+          LATEST_URL=$(gh release view --json assets --jq '.assets[] | select(.name=="documents.sha256") | .url' 2>/dev/null || true)
           if [ -n "$LATEST_URL" ]; then
             LATEST_MANIFEST=$(curl -sL "$LATEST_URL")
-            if [ "$LATEST_MANIFEST" = "$(cat data/laws.sha256)" ]; then
+            if [ "$LATEST_MANIFEST" = "$(cat data/documents.sha256)" ]; then
               echo "unchanged=true" >> "$GITHUB_OUTPUT"
               exit 0
             fi
@@ -282,7 +282,7 @@ jobs:
 
           cd data
           gh release create "$TAG" $PRERELEASE \
-            documents.parquet articles.parquet paragraphs.parquet relationships.parquet raw_documents.parquet raw_versions.parquet fts.duckdb.zst.part-* create_views.sql laws.sha256 \
+            documents.parquet articles.parquet paragraphs.parquet relationships.parquet raw_documents.parquet raw_versions.parquet fts.duckdb.zst.part-* create_views.sql documents.sha256 \
             --title "$TAG" \
             --notes "$(cat <<EOF
           Romanian legal corpus snapshot.
