@@ -74,10 +74,7 @@ jobs:
         run: |
           mkdir -p data
           LATEST=$(gh release list --json tagName --jq '[.[] | select(.tagName | startswith("laws/"))][0].tagName')
-          # Tolerate the corpus rename transition: prefer documents.parquet, fall back to legacy acte.parquet.
-          # extracts/relationships.py only reads the `link` column, which exists under both names.
-          gh release download "$LATEST" --pattern 'documents.parquet' --dir data 2>/dev/null \
-            || { gh release download "$LATEST" --pattern 'acte.parquet' --dir data && mv data/acte.parquet data/documents.parquet; }
+          gh release download "$LATEST" --pattern 'documents.parquet' --dir data
           gh release download relationships --pattern 'raw_relationships.parquet' --dir data || echo "no cache yet"
       - name: Extract shard
         run: uv run python -m etl.extract relationships
@@ -105,8 +102,7 @@ jobs:
         run: |
           mkdir -p data
           LATEST=$(gh release list --json tagName --jq '[.[] | select(.tagName | startswith("laws/"))][0].tagName')
-          gh release download "$LATEST" --pattern 'documents.parquet' --dir data 2>/dev/null \
-            || { gh release download "$LATEST" --pattern 'acte.parquet' --dir data && mv data/acte.parquet data/documents.parquet; }
+          gh release download "$LATEST" --pattern 'documents.parquet' --dir data
           gh release download relationships --pattern 'raw_relationships.parquet' --dir data || echo "first round, no cache"
       - uses: actions/download-artifact@v6
         with:
